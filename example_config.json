@@ -1,0 +1,13 @@
+{
+  "attention": 10,
+  "meditation": 10,
+  "signal": 0,
+  "delta": 50000,
+  "theta": 50000,
+  "low_alpha": 20000,
+  "high_alpha": 20000,
+  "low_beta": 15000,
+  "high_beta": 15000,
+  "low_gamma": 10000,
+  "high_gamma": 10000
+}

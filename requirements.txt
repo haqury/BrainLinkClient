@@ -1,0 +1,27 @@
+# BrainLink Client Python - Requirements
+
+# GUI
+PyQt5>=5.15.9
+
+# Bluetooth connectivity
+bleak>=0.21.1
+pybluez>=0.23; sys_platform == 'linux'
+
+# BrainLink SDK integration (for real device)
+pythonnet>=3.0.0
+
+# Mouse and keyboard control
+pyautogui>=0.9.54
+pynput>=1.7.6
+
+# Data processing and math
+numpy>=1.24.0
+
+# JSON serialization
+dataclasses-json>=0.6.3
+
+# Networking
+# Standard library: socket, asyncio
+
+# Additional utilities
+python-dateutil>=2.8.2
