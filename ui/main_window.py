@@ -5,7 +5,8 @@ import asyncio
 import threading
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QCheckBox, QLineEdit, QFileDialog, QGroupBox, QMessageBox
+    QPushButton, QCheckBox, QLineEdit, QFileDialog, QGroupBox, QMessageBox,
+    QSystemTrayIcon
 )
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from pynput import keyboard
@@ -21,6 +22,7 @@ from services.mouse_service import MouseService
 from services.head_tracker_service import HeadTracker
 from services.system_service import SystemService
 from .styles import apply_brainlink_style
+from .tray_icon import TrayIcon
 
 logger = logging.getLogger(__name__)
 
@@ -58,11 +60,18 @@ class MainWindow(QMainWindow):
         # State
         self.current_event = ""
         self.keyboard_listener: Optional[keyboard.Listener] = None
+        self._minimize_to_tray = True  # Minimize to tray by default
         
         # Connection management
         self._connection_thread: Optional[threading.Thread] = None
         self._connection_loop: Optional[asyncio.AbstractEventLoop] = None
         self._is_connected = False
+        
+        # System tray
+        self.tray_icon = TrayIcon(self)
+        self.tray_icon.show_window.connect(self.show_from_tray)
+        self.tray_icon.hide_window.connect(self.hide_to_tray)
+        self.tray_icon.quit_app.connect(self.quit_application)
         
         # Setup UI
         self.init_ui()
@@ -74,7 +83,10 @@ class MainWindow(QMainWindow):
         self.connection_error.connect(self.on_connection_error)
         self.connection_success.connect(self.on_connection_success)
         
-        logger.info("MainWindow initialized")
+        # Show tray icon
+        self.tray_icon.show()
+        
+        logger.info("MainWindow initialized with system tray")
 
     def init_ui(self):
         """Initialize the user interface"""
@@ -154,9 +166,14 @@ class MainWindow(QMainWindow):
         
         self.cb_autouse = QCheckBox("Auto Use (Direct Control)")
         self.cb_use_key = QCheckBox("Use Key Control")
+        self.chk_minimize_to_tray = QCheckBox("Minimize to tray")
+        self.chk_minimize_to_tray.setChecked(True)
+        self.chk_minimize_to_tray.setToolTip("Minimize to system tray instead of closing")
+        self.chk_minimize_to_tray.stateChanged.connect(self.on_minimize_to_tray_changed)
         
         control_layout.addWidget(self.cb_autouse)
         control_layout.addWidget(self.cb_use_key)
+        control_layout.addWidget(self.chk_minimize_to_tray)
         
         control_group.setLayout(control_layout)
         main_layout.addWidget(control_group)
@@ -266,6 +283,11 @@ class MainWindow(QMainWindow):
         self.connect_form = ConnectForm(self)
         self.connect_form.show()
 
+    def on_minimize_to_tray_changed(self, state):
+        """Handle minimize to tray checkbox state change"""
+        self._minimize_to_tray = (state == Qt.Checked)
+        logger.info(f"Minimize to tray: {'enabled' if self._minimize_to_tray else 'disabled'}")
+    
     def on_browse_clicked(self):
         """Handle browse button click"""
         file_path, _ = QFileDialog.getSaveFileName(
@@ -451,6 +473,10 @@ class MainWindow(QMainWindow):
         self._is_connected = False
         self._connection_thread = None
         self._connection_loop = None
+        
+        # Update tray status
+        self.tray_icon.update_status(connected=False)
+        
         logger.info("Device disconnected")
     
     def on_connection_error(self, error_msg: str):
@@ -461,6 +487,14 @@ class MainWindow(QMainWindow):
             "Connection Error",
             f"Failed to connect to device:\n\n{error_msg}\n\nCheck logs for details."
         )
+        
+        # Update tray status and notification
+        self.tray_icon.update_status(connected=False)
+        self.tray_icon.show_message(
+            "BrainLink Client",
+            f"Connection failed",
+            QSystemTrayIcon.Critical
+        )
     
     def on_connection_success(self, address: str):
         """Handle successful connection signal (called in main thread)"""
@@ -469,6 +503,14 @@ class MainWindow(QMainWindow):
             self,
             "Connected",
             f"Successfully connected to device:\n{address}"
+        )
+        
+        # Update tray status and notification
+        self.tray_icon.update_status(connected=True)
+        self.tray_icon.show_message(
+            "BrainLink Client",
+            f"Connected to {address}",
+            QSystemTrayIcon.Information
         )
     
     def on_eeg_data_event(self, model: BrainLinkModel):
@@ -537,7 +579,37 @@ class MainWindow(QMainWindow):
             logger.debug("Gyro form not open - data not displayed")
 
     def closeEvent(self, event):
-        """Handle window close event with proper resource cleanup"""
+        """Handle window close event - minimize to tray or quit"""
+        if self._minimize_to_tray:
+            # Minimize to tray instead of closing
+            event.ignore()
+            self.hide_to_tray()
+            logger.info("Window minimized to tray")
+        else:
+            # Actually quit the application
+            self.quit_application()
+            event.accept()
+    
+    def hide_to_tray(self):
+        """Hide window to system tray"""
+        self.hide()
+        self.tray_icon.show_message(
+            "BrainLink Client",
+            "Application minimized to tray. Double-click tray icon to restore.",
+            QSystemTrayIcon.Information,
+            2000
+        )
+        logger.info("Window hidden to tray")
+    
+    def show_from_tray(self):
+        """Show window from system tray"""
+        self.show()
+        self.activateWindow()
+        self.raise_()
+        logger.info("Window restored from tray")
+    
+    def quit_application(self):
+        """Properly quit the application with cleanup"""
         logger.info("Application closing - cleaning up resources")
         
         try:
@@ -583,10 +655,21 @@ class MainWindow(QMainWindow):
                     except Exception as e:
                         logger.error(f"Error closing {window_name}: {e}")
             
+            # Cleanup tray icon
+            logger.info("Cleaning up tray icon")
+            try:
+                self.tray_icon.cleanup()
+            except Exception as e:
+                logger.error(f"Error cleaning up tray icon: {e}")
+            
             logger.info("All resources cleaned up successfully")
-            event.accept()
+            
+            # Quit the application
+            from PyQt5.QtWidgets import QApplication
+            QApplication.quit()
             
         except Exception as e:
             logger.error(f"Error during cleanup: {e}", exc_info=True)
-            # Accept anyway to allow app to close
-            event.accept()
+            # Quit anyway to allow app to close
+            from PyQt5.QtWidgets import QApplication
+            QApplication.quit()
