@@ -21,6 +21,8 @@ from services.history_service import HistoryService
 from services.mouse_service import MouseService
 from services.head_tracker_service import HeadTracker
 from services.system_service import SystemService
+from services.ml_trainer_service import MLTrainerService
+from services.ml_predictor_service import MLPredictorService
 from .styles import apply_brainlink_style
 from .tray_icon import TrayIcon
 
@@ -45,6 +47,11 @@ class MainWindow(QMainWindow):
         self.head_tracker = HeadTracker()
         self.system_service = SystemService()
         
+        # ML Services
+        self.ml_trainer = MLTrainerService()
+        self.ml_predictor = MLPredictorService(self.ml_trainer)
+        self._use_ml_prediction = False  # Flag to switch between rule-based and ML prediction
+        
         # Configuration - load defaults from config_defaults.py
         self.config = get_default_config()
         
@@ -53,6 +60,10 @@ class MainWindow(QMainWindow):
         self.eeg_data_form = None
         self.gyro_form = None
         self.config_form = None
+        self.ml_control_form = None
+        
+        # ML training state
+        self._is_collecting_training_data = False
         
         # Simulator
         self.simulator = None
@@ -236,6 +247,11 @@ class MainWindow(QMainWindow):
         self.btn_gyro.clicked.connect(self.on_gyro_clicked)
         windows_layout.addWidget(self.btn_gyro)
         
+        self.btn_ml_control = QPushButton("ML Control")
+        self.btn_ml_control.clicked.connect(self.on_ml_control_clicked)
+        self.btn_ml_control.setToolTip("Open ML model training and control")
+        windows_layout.addWidget(self.btn_ml_control)
+        
         windows_group.setLayout(windows_layout)
         main_layout.addWidget(windows_group)
         
@@ -333,6 +349,19 @@ class MainWindow(QMainWindow):
             from ui.gyro_form import GyroForm
             self.gyro_form = GyroForm(self.head_tracker)
         self.gyro_form.show()
+    
+    def on_ml_control_clicked(self):
+        """Handle ML control button click - opens separate window"""
+        if self.ml_control_form is None or not self.ml_control_form.isVisible():
+            from ui.ml_control_form import MLControlForm
+            self.ml_control_form = MLControlForm(self.ml_trainer, self.ml_predictor, self)
+            self.ml_control_form.show()
+        else:
+            # Bring existing window to front
+            self.ml_control_form.raise_()
+            self.ml_control_form.activateWindow()
+        
+        self.ml_control_form.update_status()
 
     def update_counter(self):
         """Update history counter display"""
@@ -519,6 +548,19 @@ class MainWindow(QMainWindow):
 
     def on_eeg_data_updated(self, model: BrainLinkModel):
         """Handle EEG data in main thread"""
+        # Get event name (rule-based or ML-based)
+        event_name = self.get_event_name()  # Default: rule-based
+        
+        # Use ML prediction if enabled
+        if self._use_ml_prediction and self.ml_predictor.is_ready():
+            prediction = self.ml_predictor.predict(model)
+            if prediction and prediction.is_confident(self.ml_trainer.config.confidence_threshold):
+                event_name = prediction.predicted_event
+                logger.debug(f"ML predicted event: {event_name} (confidence: {prediction.confidence:.2f})")
+            else:
+                logger.debug("ML prediction not confident enough, using rule-based")
+                event_name = self.get_event_name()
+        
         # Create history record
         h = EegHistoryModel(
             attention=model.attention,
@@ -531,7 +573,7 @@ class MainWindow(QMainWindow):
             high_beta=model.high_beta,
             low_gamma=model.low_gamma,
             high_gamma=model.high_gamma,
-            event_name=self.get_event_name()
+            event_name=event_name
         )
         
         # Process mouse control
@@ -548,6 +590,25 @@ class MainWindow(QMainWindow):
         # Add to history if event is set
         if h.event_name:
             self.history_service.add(h)
+        
+        # Collect training data if in training mode
+        if hasattr(self, '_is_collecting_training_data') and self._is_collecting_training_data and event_name:
+            from models.ml_models import MLTrainingData
+            training_sample = MLTrainingData(
+                attention=model.attention,
+                meditation=model.meditation,
+                delta=model.delta,
+                theta=model.theta,
+                low_alpha=model.low_alpha,
+                high_alpha=model.high_alpha,
+                low_beta=model.low_beta,
+                high_beta=model.high_beta,
+                low_gamma=model.low_gamma,
+                high_gamma=model.high_gamma,
+                event=event_name
+            )
+            self.ml_trainer.add_training_sample(training_sample)
+            logger.debug(f"Added training sample for event: {event_name}")
             self.update_counter()
 
     def on_extend_data_event(self, model: BrainLinkExtendModel):

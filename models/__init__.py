@@ -10,6 +10,7 @@ from .eeg_models import (
 from .gyro_models import GyroHistory
 from .system_models import SystemInfo
 from .event_types import EventType
+from .ml_models import MLTrainingData, MLConfig, MLPrediction
 
 __all__ = [
     'BrainLinkModel',
@@ -19,5 +20,8 @@ __all__ = [
     'ConfigParams',
     'GyroHistory',
     'SystemInfo',
-    'EventType'
+    'EventType',
+    'MLTrainingData',
+    'MLConfig',
+    'MLPrediction'
 ]
