@@ -1,9 +1,12 @@
 """History service for managing EEG data history"""
 
 import json
+import logging
 from typing import List, Dict
 from pathlib import Path
 from models.eeg_models import EegHistoryModel, ConfigParams, EegFaultModel
+
+logger = logging.getLogger(__name__)
 
 
 class HistoryService:
@@ -28,30 +31,30 @@ class HistoryService:
         """Load history from JSON file"""
         file_path = Path(path)
         if not file_path.exists():
-            print(f"File not found: {path}")
+            logger.warning(f"History file not found: {path}")
             return
 
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
                 self.history = [EegHistoryModel.from_dict(item) for item in data]
-                print(f"Loaded {len(self.history)} records from history")
+                logger.info(f"Loaded {len(self.history)} records from history")
         except Exception as e:
-            print(f"Error loading history: {e}")
+            logger.error(f"Error loading history: {e}", exc_info=True)
 
     def save(self, path: str):
         """Save history to JSON file"""
         if not self.history:
-            print("No history to save")
+            logger.warning("No history to save")
             return
 
         try:
             with open(path, 'w', encoding='utf-8') as f:
                 data = [record.to_dict() for record in self.history]
                 json.dump(data, f, indent=2, ensure_ascii=False)
-                print(f"Saved {len(self.history)} records to {path}")
+                logger.info(f"Saved {len(self.history)} records to {path}")
         except Exception as e:
-            print(f"Error saving history: {e}")
+            logger.error(f"Error saving history: {e}", exc_info=True)
 
     def get_event_name_by(self, current: EegHistoryModel, config: ConfigParams) -> str:
         """
@@ -88,8 +91,8 @@ class HistoryService:
                 'stop': sum(1 for x in results if x.event_name == 'stop')
             }
 
-            print(f"ml: {counts['ml']}, mr: {counts['mr']}, "
-                  f"mu: {counts['mu']}, md: {counts['md']}, stop: {counts['stop']}")
+            logger.debug(f"Event counts - ml: {counts['ml']}, mr: {counts['mr']}, "
+                        f"mu: {counts['mu']}, md: {counts['md']}, stop: {counts['stop']}")
 
             # Return most common event
             if counts:

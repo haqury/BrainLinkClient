@@ -1,5 +1,6 @@
 """Configuration form for EEG fault tolerance settings"""
 
+import logging
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QGridLayout, QHBoxLayout, QLabel,
     QPushButton, QLineEdit, QGroupBox, QFileDialog
@@ -11,6 +12,8 @@ from pathlib import Path
 from models.eeg_models import EegFaultModel
 from config_defaults import DEFAULT_BASE_FAULT, DEFAULT_MULTI_FAULT, DEFAULT_MULTI_COUNT, DEFAULT_CONFIG_PATH
 from .styles import apply_brainlink_style
+
+logger = logging.getLogger(__name__)
 
 
 class ConfigForm(QDialog):
@@ -129,7 +132,7 @@ class ConfigForm(QDialog):
     def load_current_config(self):
         """Load current configuration from parent window"""
         if not hasattr(self.parent_window, 'config') or not self.parent_window.config:
-            print("Using default configuration values")
+            logger.info("Using default configuration values")
             return
         
         config = self.parent_window.config
@@ -151,7 +154,7 @@ class ConfigForm(QDialog):
         # Load multi count
         self.txt_multi_count.setText(str(config.multi_count))
         
-        print(f"✅ Loaded current configuration: multi_count={config.multi_count}")
+        logger.info(f"Loaded current configuration: multi_count={config.multi_count}")
     
     def get_config_fault(self) -> EegFaultModel:
         """Get base fault configuration from inputs"""
@@ -163,7 +166,7 @@ class ConfigForm(QDialog):
             
             return EegFaultModel(**values)
         except Exception as e:
-            print(f"Error parsing config: {e}")
+            logger.error(f"Error parsing config: {e}")
             return EegFaultModel()
     
     def get_config_fault_multi(self) -> EegFaultModel:
@@ -176,7 +179,7 @@ class ConfigForm(QDialog):
             
             return EegFaultModel(**values)
         except Exception as e:
-            print(f"Error parsing multi config: {e}")
+            logger.error(f"Error parsing multi config: {e}")
             return EegFaultModel()
     
     def get_multi_count(self) -> int:
@@ -214,7 +217,7 @@ class ConfigForm(QDialog):
         file_path = Path(self.txt_filepath.text())
         
         if not file_path.exists():
-            print(f"❌ File not found: {file_path}")
+            logger.warning(f"Config file not found: {file_path}")
             return
         
         try:
@@ -243,8 +246,8 @@ class ConfigForm(QDialog):
                     # Update multi count
                     self.txt_multi_count.setText(str(multi_count))
                     
-                    print(f"✅ Full config loaded from {file_path}")
-                    print(f"   - Multi count: {multi_count}")
+                    logger.info(f"Full config loaded from {file_path}")
+                    logger.debug(f"Multi count: {multi_count}")
                 else:
                     # Old format (only base fault) - for backward compatibility
                     config = EegFaultModel.from_dict(data)
@@ -255,9 +258,9 @@ class ConfigForm(QDialog):
                         field = getattr(self, f'txt_{field_name}')
                         field.setText(str(value))
                     
-                    print(f"⚠️ Loaded old format config from {file_path} (base fault only)")
+                    logger.warning(f"Loaded old format config from {file_path} (base fault only)")
         except Exception as e:
-            print(f"❌ Error loading config: {e}")
+            logger.error(f"Error loading config: {e}", exc_info=True)
     
     def on_save_clicked(self):
         """Handle save button click - saves full configuration"""
@@ -279,9 +282,9 @@ class ConfigForm(QDialog):
             
             with open(file_path, 'w', encoding='utf-8') as f:
                 json.dump(full_config, f, indent=2)
-                print(f"✅ Config saved to {file_path}")
-                print(f"   - Base fault: {base_config.to_dict()}")
-                print(f"   - Multi fault: {multi_config.to_dict()}")
-                print(f"   - Multi count: {multi_count}")
+                logger.info(f"Config saved to {file_path}")
+                logger.debug(f"Base fault: {base_config.to_dict()}")
+                logger.debug(f"Multi fault: {multi_config.to_dict()}")
+                logger.debug(f"Multi count: {multi_count}")
         except Exception as e:
-            print(f"❌ Error saving config: {e}")
+            logger.error(f"Error saving config: {e}", exc_info=True)

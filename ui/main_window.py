@@ -1,8 +1,11 @@
 """Main window for BrainLink Client application"""
 
+import logging
+import asyncio
+import threading
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QCheckBox, QLineEdit, QFileDialog, QGroupBox
+    QPushButton, QCheckBox, QLineEdit, QFileDialog, QGroupBox, QMessageBox
 )
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from pynput import keyboard
@@ -18,6 +21,8 @@ from services.head_tracker_service import HeadTracker
 from services.system_service import SystemService
 from .styles import apply_brainlink_style
 
+logger = logging.getLogger(__name__)
+
 
 class MainWindow(QMainWindow):
     """Main application window"""
@@ -25,6 +30,8 @@ class MainWindow(QMainWindow):
     # Signals for thread-safe UI updates
     eeg_data_updated = pyqtSignal(object)
     extend_data_updated = pyqtSignal(object)
+    connection_error = pyqtSignal(str)  # Signal for connection errors
+    connection_success = pyqtSignal(str)  # Signal for successful connection
 
     def __init__(self):
         super().__init__()
@@ -51,6 +58,11 @@ class MainWindow(QMainWindow):
         self.current_event = ""
         self.keyboard_listener: Optional[keyboard.Listener] = None
         
+        # Connection management
+        self._connection_thread: Optional[threading.Thread] = None
+        self._connection_loop: Optional[asyncio.AbstractEventLoop] = None
+        self._is_connected = False
+        
         # Setup UI
         self.init_ui()
         self.setup_keyboard_listener()
@@ -58,6 +70,10 @@ class MainWindow(QMainWindow):
         # Connect signals
         self.eeg_data_updated.connect(self.on_eeg_data_updated)
         self.extend_data_updated.connect(self.on_extend_data_updated)
+        self.connection_error.connect(self.on_connection_error)
+        self.connection_success.connect(self.on_connection_success)
+        
+        logger.info("MainWindow initialized")
 
     def init_ui(self):
         """Initialize the user interface"""
@@ -336,46 +352,127 @@ class MainWindow(QMainWindow):
             self.config.eeg_faults.append(new_fault)
         
         self.config.multi_count = multi_count
-        print(f"Config updated: multi_count={multi_count}")
+        logger.info(f"Config updated: multi_count={multi_count}")
 
     def connect_device(self, address: str):
-        """Connect to BrainLink device via pybrainlink"""
-        print(f"Connecting to device: {address}")
-        print("ℹ️ Using PyBrainLink library for Bluetooth connection")
+        """Connect to BrainLink device via pybrainlink with proper error handling"""
+        logger.info(f"Connecting to device: {address}")
+        logger.info("Using PyBrainLink library for Bluetooth connection")
         
-        # Start async connection in thread
-        import asyncio
-        import threading
+        # Disconnect previous connection if exists
+        if self._is_connected:
+            logger.warning("Disconnecting previous connection before new one")
+            self.disconnect_device()
+        
+        # Import pybrainlink
         from pybrainlink import BrainLinkDevice
         
         def connect_async():
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            
-            device = BrainLinkDevice()
-            device.on_eeg_data = self.on_eeg_data_event
-            device.on_extend_data = self.on_extend_data_event
-            
-            # Connect to gyro if form exists
-            if self.gyro_form:
-                device.on_gyro_data = self.gyro_form.update_gyro_data
+            """Async connection function with proper exception handling"""
+            loop = None
+            device = None
             
             try:
+                # Create new event loop
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                self._connection_loop = loop
+                
+                logger.debug("Creating BrainLinkDevice instance")
+                device = BrainLinkDevice()
+                device.on_eeg_data = self.on_eeg_data_event
+                device.on_extend_data = self.on_extend_data_event
+                
+                # Connect to gyro if form exists
+                if self.gyro_form:
+                    device.on_gyro_data = self.gyro_form.update_gyro_data
+                
+                logger.info(f"Attempting to connect to device: {address}")
+                
                 # Connect to device
                 loop.run_until_complete(device.connect(address))
-                print(f"✅ Connected to device: {address}")
+                
+                self._is_connected = True
+                logger.info(f"Successfully connected to device: {address}")
+                self.connection_success.emit(address)
                 
                 # Keep connection alive
                 loop.run_forever()
+                
+            except asyncio.CancelledError:
+                logger.info("Connection cancelled by user")
+                
             except Exception as e:
-                print(f"❌ Connection error: {e}")
+                error_msg = f"Connection error: {str(e)}"
+                logger.error(error_msg, exc_info=True)
+                self.connection_error.emit(error_msg)
+                
             finally:
-                loop.run_until_complete(device.disconnect())
-                loop.close()
+                # Clean up
+                logger.debug("Cleaning up connection resources")
+                self._is_connected = False
+                
+                if device:
+                    try:
+                        if loop and loop.is_running():
+                            loop.run_until_complete(device.disconnect())
+                    except Exception as e:
+                        logger.error(f"Error disconnecting device: {e}")
+                
+                if loop:
+                    try:
+                        loop.close()
+                    except Exception as e:
+                        logger.error(f"Error closing event loop: {e}")
+                
+                self._connection_loop = None
+                logger.info("Connection thread terminated")
         
-        thread = threading.Thread(target=connect_async, daemon=True)
-        thread.start()
+        # Start connection thread
+        self._connection_thread = threading.Thread(target=connect_async, daemon=True, name="BLE-Connection")
+        self._connection_thread.start()
+        logger.debug("Connection thread started")
 
+    def disconnect_device(self):
+        """Disconnect from device and clean up resources"""
+        logger.info("Disconnecting from device")
+        
+        if self._connection_loop and self._connection_loop.is_running():
+            try:
+                logger.debug("Stopping connection event loop")
+                self._connection_loop.call_soon_threadsafe(self._connection_loop.stop)
+            except Exception as e:
+                logger.error(f"Error stopping event loop: {e}")
+        
+        if self._connection_thread and self._connection_thread.is_alive():
+            logger.debug("Waiting for connection thread to terminate")
+            self._connection_thread.join(timeout=2.0)
+            if self._connection_thread.is_alive():
+                logger.warning("Connection thread did not terminate gracefully")
+        
+        self._is_connected = False
+        self._connection_thread = None
+        self._connection_loop = None
+        logger.info("Device disconnected")
+    
+    def on_connection_error(self, error_msg: str):
+        """Handle connection error signal (called in main thread)"""
+        logger.error(f"Connection error in UI: {error_msg}")
+        QMessageBox.critical(
+            self,
+            "Connection Error",
+            f"Failed to connect to device:\n\n{error_msg}\n\nCheck logs for details."
+        )
+    
+    def on_connection_success(self, address: str):
+        """Handle successful connection signal (called in main thread)"""
+        logger.info(f"Connection successful in UI: {address}")
+        QMessageBox.information(
+            self,
+            "Connected",
+            f"Successfully connected to device:\n{address}"
+        )
+    
     def on_eeg_data_event(self, model: BrainLinkModel):
         """Handle EEG data event (called from device)"""
         self.eeg_data_updated.emit(model)
@@ -426,26 +523,56 @@ class MainWindow(QMainWindow):
         self.lbl_heart.setText(str(model.heart_rate))
 
     def closeEvent(self, event):
-        """Handle window close event"""
-        # Stop keyboard listener
-        if self.keyboard_listener:
-            self.keyboard_listener.stop()
+        """Handle window close event with proper resource cleanup"""
+        logger.info("Application closing - cleaning up resources")
         
-        # Stop mouse service
-        self.mouse_service.stop()
-        
-        # Stop simulator if running
-        if self.simulator:
-            self.simulator.disconnect()
-        
-        # Close child windows
-        if self.connect_form:
-            self.connect_form.close()
-        if self.eeg_data_form:
-            self.eeg_data_form.close()
-        if self.gyro_form:
-            self.gyro_form.close()
-        if self.config_form:
-            self.config_form.close()
-        
-        event.accept()
+        try:
+            # Stop device connection
+            if self._is_connected:
+                logger.info("Disconnecting from device")
+                self.disconnect_device()
+            
+            # Stop keyboard listener
+            if self.keyboard_listener:
+                logger.info("Stopping keyboard listener")
+                try:
+                    self.keyboard_listener.stop()
+                except Exception as e:
+                    logger.error(f"Error stopping keyboard listener: {e}")
+            
+            # Stop mouse service
+            logger.info("Stopping mouse service")
+            try:
+                self.mouse_service.stop()
+            except Exception as e:
+                logger.error(f"Error stopping mouse service: {e}")
+            
+            # Stop simulator if running
+            if self.simulator:
+                logger.info("Stopping simulator")
+                try:
+                    self.simulator.disconnect()
+                except Exception as e:
+                    logger.error(f"Error stopping simulator: {e}")
+            
+            # Close child windows
+            logger.debug("Closing child windows")
+            for window_name, window in [
+                ('connect_form', self.connect_form),
+                ('eeg_data_form', self.eeg_data_form),
+                ('gyro_form', self.gyro_form),
+                ('config_form', self.config_form)
+            ]:
+                if window:
+                    try:
+                        window.close()
+                    except Exception as e:
+                        logger.error(f"Error closing {window_name}: {e}")
+            
+            logger.info("All resources cleaned up successfully")
+            event.accept()
+            
+        except Exception as e:
+            logger.error(f"Error during cleanup: {e}", exc_info=True)
+            # Accept anyway to allow app to close
+            event.accept()
