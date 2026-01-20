@@ -7,6 +7,9 @@ promt.txt
 # PyBrainLink local repo (not needed - installed from GitHub)
 /pybrainlink/
 
+# Code review (internal document)
+CODE_REVIEW.md
+
 # C extensions
 *.so
 
