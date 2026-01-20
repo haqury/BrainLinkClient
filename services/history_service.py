@@ -105,96 +105,53 @@ class HistoryService:
         current: EegHistoryModel,
         fault: EegFaultModel
     ) -> List[EegHistoryModel]:
-        """Search for matching events within fault tolerance"""
+        """
+        Search for matching events within fault tolerance.
+        
+        Filters historical records that match the current EEG data
+        within specified tolerance ranges for each parameter.
+        
+        Args:
+            results: List of historical EEG records to filter
+            current: Current EEG data to match against
+            fault: Fault tolerance values for each parameter
+            
+        Returns:
+            Filtered list of matching EEG records
+        """
         if not results or not fault:
             return results
 
-        # Filter by attention
-        if fault.attention != 0:
-            results = [
-                x for x in results
-                if current.attention - fault.attention <= x.attention <= current.attention + fault.attention
-            ]
-        if not results:
-            return results
+        # Define parameters to check (field_name, use_filter)
+        # Order matters: filter most selective parameters first for better performance
+        filter_params = [
+            ('attention', fault.attention),
+            ('meditation', fault.meditation),
+            ('delta', fault.delta),
+            ('theta', fault.theta),
+            ('high_beta', fault.high_beta),
+            ('low_beta', fault.low_beta),
+            ('high_alpha', fault.high_alpha),
+            ('low_alpha', fault.low_alpha),
+            ('high_gamma', fault.high_gamma),
+            ('low_gamma', fault.low_gamma),
+        ]
 
-        # Filter by meditation
-        if fault.meditation != 0:
-            results = [
-                x for x in results
-                if current.meditation - fault.meditation <= x.meditation <= current.meditation + fault.meditation
-            ]
-        if not results:
-            return results
+        # Filter results using all active parameters in one pass
+        def matches_criteria(record: EegHistoryModel) -> bool:
+            """Check if record matches all fault tolerance criteria"""
+            for field_name, tolerance in filter_params:
+                if tolerance == 0:
+                    continue  # Skip disabled parameters
+                
+                current_value = getattr(current, field_name)
+                record_value = getattr(record, field_name)
+                
+                # Check if value is within tolerance range
+                if not (current_value - tolerance <= record_value <= current_value + tolerance):
+                    return False
+            
+            return True
 
-        # Filter by delta
-        if fault.delta != 0:
-            results = [
-                x for x in results
-                if current.delta - fault.delta <= x.delta <= current.delta + fault.delta
-            ]
-        if not results:
-            return results
-
-        # Filter by theta
-        if fault.theta != 0:
-            results = [
-                x for x in results
-                if current.theta - fault.theta <= x.theta <= current.theta + fault.theta
-            ]
-        if not results:
-            return results
-
-        # Filter by high beta
-        if fault.high_beta != 0:
-            results = [
-                x for x in results
-                if current.high_beta - fault.high_beta <= x.high_beta <= current.high_beta + fault.high_beta
-            ]
-        if not results:
-            return results
-
-        # Filter by low beta
-        if fault.low_beta != 0:
-            results = [
-                x for x in results
-                if current.low_beta - fault.low_beta <= x.low_beta <= current.low_beta + fault.low_beta
-            ]
-        if not results:
-            return results
-
-        # Filter by high alpha
-        if fault.high_alpha != 0:
-            results = [
-                x for x in results
-                if current.high_alpha - fault.high_alpha <= x.high_alpha <= current.high_alpha + fault.high_alpha
-            ]
-        if not results:
-            return results
-
-        # Filter by low alpha
-        if fault.low_alpha != 0:
-            results = [
-                x for x in results
-                if current.low_alpha - fault.low_alpha <= x.low_alpha <= current.low_alpha + fault.low_alpha
-            ]
-        if not results:
-            return results
-
-        # Filter by high gamma
-        if fault.high_gamma != 0:
-            results = [
-                x for x in results
-                if current.high_gamma - fault.high_gamma <= x.high_gamma <= current.high_gamma + fault.high_gamma
-            ]
-        if not results:
-            return results
-
-        # Filter by low gamma
-        if fault.low_gamma != 0:
-            results = [
-                x for x in results
-                if current.low_gamma - fault.low_gamma <= x.low_gamma <= current.low_gamma + fault.low_gamma
-            ]
-
-        return results
+        # Single-pass filtering
+        return [record for record in results if matches_criteria(record)]

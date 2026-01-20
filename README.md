@@ -104,31 +104,96 @@ BrainLinkClient/
 │   └── system_models.py    # Системная информация
 │
 ├── services/               # Сервисные компоненты
-│   ├── bluetooth_service.py    # Bluetooth подключение
-│   ├── history_service.py      # Управление историей
-│   ├── head_tracker_service.py # Отслеживание движений головы
-│   ├── mouse_service.py        # Управление мышью
-│   └── system_service.py       # Системные функции
+│   ├── brainlink_sdk_wrapper.py  # Обертка для C# DLL (опционально)
+│   ├── device_simulator.py       # Симулятор устройства для тестов
+│   ├── history_service.py        # Управление историей
+│   ├── head_tracker_service.py   # Отслеживание движений головы
+│   ├── mouse_service.py          # Управление мышью
+│   └── system_service.py         # Системные функции
 │
 ├── ui/                     # Пользовательский интерфейс
 │   ├── main_window.py      # Главное окно
-│   ├── connect_form.py     # Окно подключения
+│   ├── connect_form.py     # Окно подключения (использует PyBrainLink)
 │   ├── eeg_data_form.py    # Отображение EEG данных
 │   ├── gyro_form.py        # Окно гироскопа
-│   └── config_form.py      # Конфигурация
+│   ├── config_form.py      # Конфигурация
+│   └── styles.py           # Темная тема оформления
 │
 ├── main.py                 # Точка входа в приложение
-├── requirements.txt        # Зависимости Python
+├── requirements.txt        # Зависимости Python (включая PyBrainLink)
 └── README.md              # Этот файл
 ```
+
+> **Примечание**: Bluetooth подключение и парсинг данных вынесены в отдельную библиотеку [PyBrainLink](https://github.com/haqury/pybrainlink)
 
 ## Технологии
 
 - **PyQt5** - графический интерфейс
-- **bleak** - Bluetooth Low Energy подключение
+- **[PyBrainLink](https://github.com/haqury/pybrainlink)** - библиотека для работы с BrainLink устройствами
+- **bleak** - Bluetooth Low Energy подключение (через PyBrainLink)
 - **pyautogui** - управление мышью
 - **pynput** - перехват клавиатуры
 - **numpy** - математические операции
+
+## PyBrainLink Library
+
+Проект использует специализированную библиотеку **PyBrainLink** для работы с BrainLink устройствами.
+
+### О библиотеке
+
+PyBrainLink - это Python библиотека для подключения к BrainLink EEG устройствам через Bluetooth LE, парсинга данных и экспорта в JSON.
+
+**Репозиторий**: https://github.com/haqury/pybrainlink
+
+**Последний релиз**: [v0.1.0](https://github.com/haqury/pybrainlink/releases/tag/v0.1.0)
+
+### Возможности PyBrainLink
+
+- ✅ Асинхронное подключение через Bluetooth LE (bleak)
+- ✅ Автоматический парсинг протокола BrainLink
+- ✅ Модели данных для EEG, Gyro и Extended данных
+- ✅ Простой API для интеграции
+- ✅ Поддержка dataclasses для удобной работы с данными
+
+### Установка
+
+Библиотека автоматически устанавливается вместе с зависимостями проекта:
+
+```bash
+pip install git+https://github.com/haqury/pybrainlink.git@v0.1.0
+```
+
+### Пример использования
+
+```python
+from pybrainlink import BrainLinkDevice, BrainLinkModel
+from dataclasses import asdict
+import asyncio
+import json
+
+async def main():
+    device = BrainLinkDevice()
+    
+    def on_eeg_data(data: BrainLinkModel):
+        # Конвертировать в JSON
+        json_data = json.dumps(asdict(data), indent=2)
+        print(json_data)
+    
+    device.on_eeg_data = on_eeg_data
+    
+    # Подключение к устройству
+    devices = await device.scan_devices(timeout=5.0)
+    if devices:
+        await device.connect(devices[0].address)
+        await asyncio.sleep(30)  # Получать данные 30 секунд
+        await device.disconnect()
+
+asyncio.run(main())
+```
+
+### Документация
+
+Полная документация доступна в репозитории PyBrainLink: https://github.com/haqury/pybrainlink#readme
 
 ## Отличия от C# версии
 
@@ -204,16 +269,32 @@ BrainLinkClient/
 2. Бизнес-логика → `services/`
 3. UI компоненты → `ui/`
 
-### Расширение протокола BrainLink
+### Работа с PyBrainLink
 
-Для работы с реальным устройством BrainLink необходимо реализовать парсинг протокола в `services/bluetooth_service.py`:
+Для работы с BrainLink устройствами используется библиотека PyBrainLink. Все низкоуровневые операции Bluetooth и парсинг протокола реализованы в ней.
+
+Пример интеграции в UI:
 
 ```python
-def _notification_handler(self, sender, data: bytearray):
-    # Парсинг данных BrainLink
-    # Вызов соответствующих callbacks
-    pass
+from pybrainlink import BrainLinkDevice, BrainLinkModel
+
+# Создание устройства
+self.device = BrainLinkDevice()
+
+# Установка callback для EEG данных
+def on_eeg_data(data: BrainLinkModel):
+    print(f"Attention: {data.attention}, Meditation: {data.meditation}")
+    
+self.device.on_eeg_data = on_eeg_data
+
+# Сканирование и подключение
+devices = await self.device.scan_devices(timeout=5.0)
+await self.device.connect(devices[0].address)
 ```
+
+### Расширение протокола BrainLink
+
+Если нужно расширить протокол или добавить поддержку новых типов данных, создайте Pull Request в репозиторий PyBrainLink: https://github.com/haqury/pybrainlink
 
 ## Лицензия
 

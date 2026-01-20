@@ -377,30 +377,36 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 print(f"Error converting address: {e}")
         else:
-            # Use direct Bluetooth connection
-            print("ℹ️ Using direct Bluetooth connection (no SDK)")
+            # Use direct Bluetooth connection via pybrainlink
+            print("ℹ️ Using direct Bluetooth connection (pybrainlink)")
             # Start async connection in thread
             import asyncio
             import threading
+            from pybrainlink import BrainLinkDevice
             
             def connect_async():
-                from services.bluetooth_service import BluetoothService
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
                 
-                bt_service = BluetoothService()
-                bt_service.on_eeg_data = self.on_eeg_data_event
-                bt_service.on_extend_data = self.on_extend_data_event
+                device = BrainLinkDevice()
+                device.on_eeg_data = self.on_eeg_data_event
+                device.on_extend_data = self.on_extend_data_event
+                
+                # Connect to gyro if form exists
+                if self.gyro_form:
+                    device.on_gyro_data = self.gyro_form.update_gyro_data
                 
                 try:
-                    loop.run_until_complete(bt_service.connect(address))
-                    # Start notifications
-                    loop.run_until_complete(bt_service.start_all_notifications())
+                    # Connect to device
+                    loop.run_until_complete(device.connect(address))
+                    print(f"✅ Connected to device: {address}")
+                    
                     # Keep connection alive
                     loop.run_forever()
                 except Exception as e:
-                    print(f"Connection error: {e}")
+                    print(f"❌ Connection error: {e}")
                 finally:
+                    loop.run_until_complete(device.disconnect())
                     loop.close()
             
             thread = threading.Thread(target=connect_async, daemon=True)
