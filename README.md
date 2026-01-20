@@ -104,7 +104,6 @@ BrainLinkClient/
 │   └── system_models.py    # Системная информация
 │
 ├── services/               # Сервисные компоненты
-│   ├── brainlink_sdk_wrapper.py  # Обертка для C# DLL (опционально)
 │   ├── device_simulator.py       # Симулятор устройства для тестов
 │   ├── history_service.py        # Управление историей
 │   ├── head_tracker_service.py   # Отслеживание движений головы

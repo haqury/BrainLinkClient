@@ -17,13 +17,6 @@ from services.head_tracker_service import HeadTracker
 from services.system_service import SystemService
 from .styles import apply_brainlink_style
 
-try:
-    from services.brainlink_sdk_wrapper import BrainLinkSDKWrapper
-    HAS_SDK_WRAPPER = True
-except:
-    HAS_SDK_WRAPPER = False
-    BrainLinkSDKWrapper = None
-
 
 class MainWindow(QMainWindow):
     """Main application window"""
@@ -40,17 +33,6 @@ class MainWindow(QMainWindow):
         self.mouse_service = MouseService()
         self.head_tracker = HeadTracker()
         self.system_service = SystemService()
-        
-        # Try to load BrainLink SDK (if available)
-        self.brainlink_sdk = None
-        if HAS_SDK_WRAPPER and BrainLinkSDKWrapper:
-            try:
-                self.brainlink_sdk = BrainLinkSDKWrapper()
-                if self.brainlink_sdk.is_initialized:
-                    self.brainlink_sdk.on_eeg_data = self.on_eeg_data_event
-                    self.brainlink_sdk.on_extend_data = self.on_extend_data_event
-            except:
-                self.brainlink_sdk = None
         
         # Configuration
         self.config = ConfigParams()
@@ -261,11 +243,7 @@ class MainWindow(QMainWindow):
         self.keyboard_listener.start()
 
     def on_start_clicked(self):
-        """Handle start button click"""
-        # Start SDK if available
-        if self.brainlink_sdk and hasattr(self.brainlink_sdk, 'is_initialized') and self.brainlink_sdk.is_initialized:
-            self.brainlink_sdk.start()
-        
+        """Handle start button click - open device connection dialog"""
         from ui.connect_form import ConnectForm
         self.connect_form = ConnectForm(self)
         self.connect_form.show()
@@ -360,57 +338,42 @@ class MainWindow(QMainWindow):
         print(f"Config updated: multi_count={multi_count}")
 
     def connect_device(self, address: str):
-        """Connect to BrainLink device"""
+        """Connect to BrainLink device via pybrainlink"""
         print(f"Connecting to device: {address}")
+        print("ℹ️ Using PyBrainLink library for Bluetooth connection")
         
-        # If SDK is available, use it
-        if self.brainlink_sdk and hasattr(self.brainlink_sdk, 'is_initialized') and self.brainlink_sdk.is_initialized:
-            # Convert address string to long
+        # Start async connection in thread
+        import asyncio
+        import threading
+        from pybrainlink import BrainLinkDevice
+        
+        def connect_async():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+            device = BrainLinkDevice()
+            device.on_eeg_data = self.on_eeg_data_event
+            device.on_extend_data = self.on_extend_data_event
+            
+            # Connect to gyro if form exists
+            if self.gyro_form:
+                device.on_gyro_data = self.gyro_form.update_gyro_data
+            
             try:
-                # If address is MAC format (XX:XX:XX:XX:XX:XX), convert to long
-                if ':' in address:
-                    address_long = int(address.replace(':', ''), 16)
-                else:
-                    address_long = int(address, 16)
+                # Connect to device
+                loop.run_until_complete(device.connect(address))
+                print(f"✅ Connected to device: {address}")
                 
-                self.brainlink_sdk.connect(address_long)
+                # Keep connection alive
+                loop.run_forever()
             except Exception as e:
-                print(f"Error converting address: {e}")
-        else:
-            # Use direct Bluetooth connection via pybrainlink
-            print("ℹ️ Using direct Bluetooth connection (pybrainlink)")
-            # Start async connection in thread
-            import asyncio
-            import threading
-            from pybrainlink import BrainLinkDevice
-            
-            def connect_async():
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                
-                device = BrainLinkDevice()
-                device.on_eeg_data = self.on_eeg_data_event
-                device.on_extend_data = self.on_extend_data_event
-                
-                # Connect to gyro if form exists
-                if self.gyro_form:
-                    device.on_gyro_data = self.gyro_form.update_gyro_data
-                
-                try:
-                    # Connect to device
-                    loop.run_until_complete(device.connect(address))
-                    print(f"✅ Connected to device: {address}")
-                    
-                    # Keep connection alive
-                    loop.run_forever()
-                except Exception as e:
-                    print(f"❌ Connection error: {e}")
-                finally:
-                    loop.run_until_complete(device.disconnect())
-                    loop.close()
-            
-            thread = threading.Thread(target=connect_async, daemon=True)
-            thread.start()
+                print(f"❌ Connection error: {e}")
+            finally:
+                loop.run_until_complete(device.disconnect())
+                loop.close()
+        
+        thread = threading.Thread(target=connect_async, daemon=True)
+        thread.start()
 
     def on_eeg_data_event(self, model: BrainLinkModel):
         """Handle EEG data event (called from device)"""
@@ -473,10 +436,6 @@ class MainWindow(QMainWindow):
         # Stop simulator if running
         if self.simulator:
             self.simulator.disconnect()
-        
-        # Close BrainLink SDK
-        if self.brainlink_sdk and hasattr(self.brainlink_sdk, 'is_initialized') and self.brainlink_sdk.is_initialized:
-            self.brainlink_sdk.close()
         
         # Close child windows
         if self.connect_form:
