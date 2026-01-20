@@ -8,8 +8,9 @@ from PyQt5.QtCore import Qt, QThread, pyqtSignal
 import asyncio
 from typing import List, Tuple
 
-from services.bluetooth_service import BluetoothService
+from pybrainlink import BrainLinkDevice  # Using pybrainlink library
 from services.device_simulator import SimulatorController
+from .styles import apply_brainlink_style
 
 
 class DeviceScanner(QThread):
@@ -20,7 +21,7 @@ class DeviceScanner(QThread):
     
     def __init__(self):
         super().__init__()
-        self.bluetooth_service = BluetoothService()
+        self.device = BrainLinkDevice()
     
     def run(self):
         """Run device scan in background thread"""
@@ -28,7 +29,7 @@ class DeviceScanner(QThread):
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             devices = loop.run_until_complete(
-                self.bluetooth_service.discover_devices(timeout=10.0)
+                self.device.scan(timeout=10.0)
             )
             self.devices_found.emit(devices)
             loop.close()
@@ -54,6 +55,9 @@ class ConnectForm(QDialog):
         """Initialize the user interface"""
         self.setWindowTitle("Connect to BrainLink Device")
         self.setGeometry(200, 200, 400, 350)
+        
+        # Apply dark theme
+        apply_brainlink_style(self)
         
         layout = QVBoxLayout(self)
         

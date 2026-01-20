@@ -13,7 +13,7 @@ except Exception as e:
     # This is OK - we'll use direct Bluetooth parsing instead
     pass
 
-from models.eeg_models import BrainLinkModel, BrainLinkExtendModel
+from pybrainlink import BrainLinkModel, BrainLinkExtendModel  # Using pybrainlink library
 
 
 class BrainLinkSDKWrapper:

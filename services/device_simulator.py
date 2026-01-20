@@ -5,7 +5,7 @@ import time
 from typing import Optional, Callable
 from threading import Thread, Event
 
-from models.eeg_models import BrainLinkModel, BrainLinkExtendModel
+from pybrainlink import BrainLinkModel, BrainLinkExtendModel  # Using pybrainlink library
 
 
 class DeviceSimulator:

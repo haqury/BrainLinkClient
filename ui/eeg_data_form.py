@@ -6,7 +6,8 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt
 
-from models.eeg_models import BrainLinkModel
+from pybrainlink import BrainLinkModel  # Using pybrainlink library
+from .styles import apply_brainlink_style
 
 
 class EEGDataForm(QDialog):
@@ -20,6 +21,9 @@ class EEGDataForm(QDialog):
         """Initialize the user interface"""
         self.setWindowTitle("EEG Data")
         self.setGeometry(300, 300, 400, 400)
+        
+        # Apply dark theme
+        apply_brainlink_style(self)
         
         layout = QVBoxLayout(self)
         

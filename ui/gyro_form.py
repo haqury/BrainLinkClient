@@ -7,6 +7,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt
 
 from services.head_tracker_service import HeadTracker
+from .styles import apply_brainlink_style
 
 
 class GyroForm(QDialog):
@@ -25,6 +26,9 @@ class GyroForm(QDialog):
         """Initialize the user interface"""
         self.setWindowTitle("Gyroscope Data")
         self.setGeometry(300, 300, 350, 300)
+        
+        # Apply dark theme
+        apply_brainlink_style(self)
         
         layout = QVBoxLayout(self)
         

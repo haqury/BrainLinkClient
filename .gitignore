@@ -2,6 +2,10 @@
 __pycache__/
 *.py[cod]
 *$py.class
+promt.txt
+
+# PyBrainLink local repo (not needed - installed from GitHub)
+/pybrainlink/
 
 # C extensions
 *.so

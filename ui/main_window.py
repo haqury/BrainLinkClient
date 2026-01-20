@@ -8,11 +8,14 @@ from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from pynput import keyboard
 from typing import Optional
 
-from models.eeg_models import BrainLinkModel, BrainLinkExtendModel, EegHistoryModel, ConfigParams, EegFaultModel
+# Using pybrainlink library for BrainLink device models
+from pybrainlink import BrainLinkModel, BrainLinkExtendModel
+from models.eeg_models import EegHistoryModel, ConfigParams, EegFaultModel
 from services.history_service import HistoryService
 from services.mouse_service import MouseService
 from services.head_tracker_service import HeadTracker
 from services.system_service import SystemService
+from .styles import apply_brainlink_style
 
 try:
     from services.brainlink_sdk_wrapper import BrainLinkSDKWrapper
@@ -77,6 +80,9 @@ class MainWindow(QMainWindow):
         """Initialize the user interface"""
         self.setWindowTitle("BrainLink Client")
         self.setGeometry(100, 100, 800, 600)
+        
+        # Apply dark theme with GreenYellow accents
+        apply_brainlink_style(self)
         
         # Central widget
         central_widget = QWidget()

@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 
 from models.eeg_models import EegFaultModel
+from .styles import apply_brainlink_style
 
 
 class ConfigForm(QDialog):
@@ -22,46 +23,56 @@ class ConfigForm(QDialog):
     def init_ui(self):
         """Initialize the user interface"""
         self.setWindowTitle("Configuration")
-        self.setGeometry(250, 250, 500, 600)
+        self.setGeometry(250, 250, 750, 450)
+        
+        # Apply dark theme
+        apply_brainlink_style(self)
         
         layout = QVBoxLayout(self)
         
-        # Base fault tolerance group
+        # Main horizontal layout for Base and Multi groups (SIDE BY SIDE)
+        groups_layout = QHBoxLayout()
+        
+        # Base fault tolerance group (LEFT)
         base_group = QGroupBox("Base Fault Tolerance")
         base_layout = QGridLayout()
         
-        # Create input fields for each parameter
-        self.txt_attention = self._add_config_row(base_layout, "Attention:", 0)
-        self.txt_meditation = self._add_config_row(base_layout, "Meditation:", 1)
-        self.txt_delta = self._add_config_row(base_layout, "Delta:", 2)
-        self.txt_theta = self._add_config_row(base_layout, "Theta:", 3)
-        self.txt_low_alpha = self._add_config_row(base_layout, "Low Alpha:", 4)
-        self.txt_high_alpha = self._add_config_row(base_layout, "High Alpha:", 5)
-        self.txt_low_beta = self._add_config_row(base_layout, "Low Beta:", 6)
-        self.txt_high_beta = self._add_config_row(base_layout, "High Beta:", 7)
-        self.txt_low_gamma = self._add_config_row(base_layout, "Low Gamma:", 8)
-        self.txt_high_gamma = self._add_config_row(base_layout, "High Gamma:", 9)
+        # Create input fields with DEFAULT VALUES from original BrainLinkConnect
+        self.txt_attention = self._add_config_row(base_layout, "Attention:", 0, "5")
+        self.txt_meditation = self._add_config_row(base_layout, "Meditation:", 1, "10")
+        self.txt_delta = self._add_config_row(base_layout, "Delta:", 2, "300")
+        self.txt_theta = self._add_config_row(base_layout, "Theta:", 3, "300")
+        self.txt_low_alpha = self._add_config_row(base_layout, "Low Alpha:", 4, "0")
+        self.txt_high_alpha = self._add_config_row(base_layout, "High Alpha:", 5, "0")
+        self.txt_low_beta = self._add_config_row(base_layout, "Low Beta:", 6, "0")
+        self.txt_high_beta = self._add_config_row(base_layout, "High Beta:", 7, "0")
+        self.txt_low_gamma = self._add_config_row(base_layout, "Low Gamma:", 8, "0")
+        self.txt_high_gamma = self._add_config_row(base_layout, "High Gamma:", 9, "0")
         
         base_group.setLayout(base_layout)
-        layout.addWidget(base_group)
+        groups_layout.addWidget(base_group)
         
-        # Multi-level multiplier group
+        # Multi-level multiplier group (RIGHT)
         multi_group = QGroupBox("Multi-Level Multiplier")
         multi_layout = QGridLayout()
         
+        # Default values from original BrainLinkConnect
         self.txt_attention_x = self._add_config_row(multi_layout, "Attention X:", 0, "1")
         self.txt_meditation_x = self._add_config_row(multi_layout, "Meditation X:", 1, "1")
-        self.txt_delta_x = self._add_config_row(multi_layout, "Delta X:", 2, "1")
-        self.txt_theta_x = self._add_config_row(multi_layout, "Theta X:", 3, "1")
-        self.txt_low_alpha_x = self._add_config_row(multi_layout, "Low Alpha X:", 4, "1")
-        self.txt_high_alpha_x = self._add_config_row(multi_layout, "High Alpha X:", 5, "1")
-        self.txt_low_beta_x = self._add_config_row(multi_layout, "Low Beta X:", 6, "1")
-        self.txt_high_beta_x = self._add_config_row(multi_layout, "High Beta X:", 7, "1")
-        self.txt_low_gamma_x = self._add_config_row(multi_layout, "Low Gamma X:", 8, "1")
-        self.txt_high_gamma_x = self._add_config_row(multi_layout, "High Gamma X:", 9, "1")
+        self.txt_delta_x = self._add_config_row(multi_layout, "Delta X:", 2, "3")
+        self.txt_theta_x = self._add_config_row(multi_layout, "Theta X:", 3, "3")
+        self.txt_low_alpha_x = self._add_config_row(multi_layout, "Low Alpha X:", 4, "3")
+        self.txt_high_alpha_x = self._add_config_row(multi_layout, "High Alpha X:", 5, "3")
+        self.txt_low_beta_x = self._add_config_row(multi_layout, "Low Beta X:", 6, "3")
+        self.txt_high_beta_x = self._add_config_row(multi_layout, "High Beta X:", 7, "3")
+        self.txt_low_gamma_x = self._add_config_row(multi_layout, "Low Gamma X:", 8, "3")
+        self.txt_high_gamma_x = self._add_config_row(multi_layout, "High Gamma X:", 9, "3")
         
         multi_group.setLayout(multi_layout)
-        layout.addWidget(multi_group)
+        groups_layout.addWidget(multi_group)
+        
+        # Add groups to main layout
+        layout.addLayout(groups_layout)
         
         # Multi-level count
         count_layout = QHBoxLayout()

@@ -3,11 +3,10 @@
 # GUI
 PyQt5>=5.15.9
 
-# Bluetooth connectivity
-bleak>=0.21.1
-pybluez>=0.23; sys_platform == 'linux'
+# BrainLink device connectivity and data parsing
+git+https://github.com/haqury/pybrainlink.git@v0.1.0
 
-# BrainLink SDK integration (for real device)
+# BrainLink SDK integration (optional, for DLL-based connection)
 pythonnet>=3.0.0
 
 # Mouse and keyboard control
@@ -19,9 +18,6 @@ numpy>=1.24.0
 
 # JSON serialization
 dataclasses-json>=0.6.3
-
-# Networking
-# Standard library: socket, asyncio
 
 # Additional utilities
 python-dateutil>=2.8.2
