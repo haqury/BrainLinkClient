@@ -9,16 +9,33 @@ import json
 from pathlib import Path
 
 from models.eeg_models import EegFaultModel
+from config_defaults import DEFAULT_BASE_FAULT, DEFAULT_MULTI_FAULT, DEFAULT_MULTI_COUNT, DEFAULT_CONFIG_PATH
 from .styles import apply_brainlink_style
 
 
 class ConfigForm(QDialog):
     """Dialog for configuring EEG fault tolerance"""
     
+    # Field names for EEG parameters (in order)
+    EEG_FIELDS = [
+        ('attention', 'Attention'),
+        ('meditation', 'Meditation'),
+        ('delta', 'Delta'),
+        ('theta', 'Theta'),
+        ('low_alpha', 'Low Alpha'),
+        ('high_alpha', 'High Alpha'),
+        ('low_beta', 'Low Beta'),
+        ('high_beta', 'High Beta'),
+        ('low_gamma', 'Low Gamma'),
+        ('high_gamma', 'High Gamma'),
+    ]
+    
     def __init__(self, parent):
         super().__init__(parent)
         self.parent_window = parent
         self.init_ui()
+        # Load current configuration from parent window
+        self.load_current_config()
     
     def init_ui(self):
         """Initialize the user interface"""
@@ -37,17 +54,11 @@ class ConfigForm(QDialog):
         base_group = QGroupBox("Base Fault Tolerance")
         base_layout = QGridLayout()
         
-        # Create input fields with DEFAULT VALUES from original BrainLinkConnect
-        self.txt_attention = self._add_config_row(base_layout, "Attention:", 0, "5")
-        self.txt_meditation = self._add_config_row(base_layout, "Meditation:", 1, "10")
-        self.txt_delta = self._add_config_row(base_layout, "Delta:", 2, "300")
-        self.txt_theta = self._add_config_row(base_layout, "Theta:", 3, "300")
-        self.txt_low_alpha = self._add_config_row(base_layout, "Low Alpha:", 4, "0")
-        self.txt_high_alpha = self._add_config_row(base_layout, "High Alpha:", 5, "0")
-        self.txt_low_beta = self._add_config_row(base_layout, "Low Beta:", 6, "0")
-        self.txt_high_beta = self._add_config_row(base_layout, "High Beta:", 7, "0")
-        self.txt_low_gamma = self._add_config_row(base_layout, "Low Gamma:", 8, "0")
-        self.txt_high_gamma = self._add_config_row(base_layout, "High Gamma:", 9, "0")
+        # Create all base fields dynamically
+        for row, (field_name, label) in enumerate(self.EEG_FIELDS):
+            default_value = str(getattr(DEFAULT_BASE_FAULT, field_name))
+            field = self._add_config_row(base_layout, f"{label}:", row, default_value)
+            setattr(self, f'txt_{field_name}', field)
         
         base_group.setLayout(base_layout)
         groups_layout.addWidget(base_group)
@@ -56,17 +67,11 @@ class ConfigForm(QDialog):
         multi_group = QGroupBox("Multi-Level Multiplier")
         multi_layout = QGridLayout()
         
-        # Default values from original BrainLinkConnect
-        self.txt_attention_x = self._add_config_row(multi_layout, "Attention X:", 0, "1")
-        self.txt_meditation_x = self._add_config_row(multi_layout, "Meditation X:", 1, "1")
-        self.txt_delta_x = self._add_config_row(multi_layout, "Delta X:", 2, "3")
-        self.txt_theta_x = self._add_config_row(multi_layout, "Theta X:", 3, "3")
-        self.txt_low_alpha_x = self._add_config_row(multi_layout, "Low Alpha X:", 4, "3")
-        self.txt_high_alpha_x = self._add_config_row(multi_layout, "High Alpha X:", 5, "3")
-        self.txt_low_beta_x = self._add_config_row(multi_layout, "Low Beta X:", 6, "3")
-        self.txt_high_beta_x = self._add_config_row(multi_layout, "High Beta X:", 7, "3")
-        self.txt_low_gamma_x = self._add_config_row(multi_layout, "Low Gamma X:", 8, "3")
-        self.txt_high_gamma_x = self._add_config_row(multi_layout, "High Gamma X:", 9, "3")
+        # Create all multiplier fields dynamically
+        for row, (field_name, label) in enumerate(self.EEG_FIELDS):
+            default_value = str(getattr(DEFAULT_MULTI_FAULT, field_name))
+            field = self._add_config_row(multi_layout, f"{label} X:", row, default_value)
+            setattr(self, f'txt_{field_name}_x', field)
         
         multi_group.setLayout(multi_layout)
         groups_layout.addWidget(multi_group)
@@ -77,14 +82,14 @@ class ConfigForm(QDialog):
         # Multi-level count
         count_layout = QHBoxLayout()
         count_layout.addWidget(QLabel("Multi Count:"))
-        self.txt_multi_count = QLineEdit("1")
+        self.txt_multi_count = QLineEdit(str(DEFAULT_MULTI_COUNT))
         count_layout.addWidget(self.txt_multi_count)
         layout.addLayout(count_layout)
         
         # File path for save/load
         file_layout = QHBoxLayout()
         file_layout.addWidget(QLabel("Config File:"))
-        self.txt_filepath = QLineEdit("C:/BLconfig/config.json")
+        self.txt_filepath = QLineEdit(DEFAULT_CONFIG_PATH)
         file_layout.addWidget(self.txt_filepath)
         
         self.btn_browse = QPushButton("Browse")
@@ -121,21 +126,42 @@ class ConfigForm(QDialog):
         layout.addWidget(txt_field, row, 1)
         return txt_field
     
+    def load_current_config(self):
+        """Load current configuration from parent window"""
+        if not hasattr(self.parent_window, 'config') or not self.parent_window.config:
+            print("Using default configuration values")
+            return
+        
+        config = self.parent_window.config
+        
+        # Load base fault tolerance dynamically
+        if config.eeg_fault:
+            for field_name, _ in self.EEG_FIELDS:
+                value = getattr(config.eeg_fault, field_name)
+                field = getattr(self, f'txt_{field_name}')
+                field.setText(str(value))
+        
+        # Load multipliers dynamically
+        if config.eeg_fault_multi:
+            for field_name, _ in self.EEG_FIELDS:
+                value = getattr(config.eeg_fault_multi, field_name)
+                field = getattr(self, f'txt_{field_name}_x')
+                field.setText(str(value))
+        
+        # Load multi count
+        self.txt_multi_count.setText(str(config.multi_count))
+        
+        print(f"✅ Loaded current configuration: multi_count={config.multi_count}")
+    
     def get_config_fault(self) -> EegFaultModel:
         """Get base fault configuration from inputs"""
         try:
-            return EegFaultModel(
-                attention=int(self.txt_attention.text() or 0),
-                meditation=int(self.txt_meditation.text() or 0),
-                delta=int(self.txt_delta.text() or 0),
-                theta=int(self.txt_theta.text() or 0),
-                low_alpha=int(self.txt_low_alpha.text() or 0),
-                high_alpha=int(self.txt_high_alpha.text() or 0),
-                low_beta=int(self.txt_low_beta.text() or 0),
-                high_beta=int(self.txt_high_beta.text() or 0),
-                low_gamma=int(self.txt_low_gamma.text() or 0),
-                high_gamma=int(self.txt_high_gamma.text() or 0)
-            )
+            values = {}
+            for field_name, _ in self.EEG_FIELDS:
+                field = getattr(self, f'txt_{field_name}')
+                values[field_name] = int(field.text() or 0)
+            
+            return EegFaultModel(**values)
         except Exception as e:
             print(f"Error parsing config: {e}")
             return EegFaultModel()
@@ -143,18 +169,12 @@ class ConfigForm(QDialog):
     def get_config_fault_multi(self) -> EegFaultModel:
         """Get multiplier configuration from inputs"""
         try:
-            return EegFaultModel(
-                attention=int(self.txt_attention_x.text() or 1),
-                meditation=int(self.txt_meditation_x.text() or 1),
-                delta=int(self.txt_delta_x.text() or 1),
-                theta=int(self.txt_theta_x.text() or 1),
-                low_alpha=int(self.txt_low_alpha_x.text() or 1),
-                high_alpha=int(self.txt_high_alpha_x.text() or 1),
-                low_beta=int(self.txt_low_beta_x.text() or 1),
-                high_beta=int(self.txt_high_beta_x.text() or 1),
-                low_gamma=int(self.txt_low_gamma_x.text() or 1),
-                high_gamma=int(self.txt_high_gamma_x.text() or 1)
-            )
+            values = {}
+            for field_name, _ in self.EEG_FIELDS:
+                field = getattr(self, f'txt_{field_name}_x')
+                values[field_name] = int(field.text() or 1)
+            
+            return EegFaultModel(**values)
         except Exception as e:
             print(f"Error parsing multi config: {e}")
             return EegFaultModel()
@@ -190,45 +210,78 @@ class ConfigForm(QDialog):
             self.txt_filepath.setText(file_path)
     
     def on_load_clicked(self):
-        """Handle load button click"""
+        """Handle load button click - loads full configuration"""
         file_path = Path(self.txt_filepath.text())
         
         if not file_path.exists():
-            print(f"File not found: {file_path}")
+            print(f"❌ File not found: {file_path}")
             return
         
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-                config = EegFaultModel.from_dict(data)
                 
-                # Update input fields
-                self.txt_attention.setText(str(config.attention))
-                self.txt_meditation.setText(str(config.meditation))
-                self.txt_delta.setText(str(config.delta))
-                self.txt_theta.setText(str(config.theta))
-                self.txt_low_alpha.setText(str(config.low_alpha))
-                self.txt_high_alpha.setText(str(config.high_alpha))
-                self.txt_low_beta.setText(str(config.low_beta))
-                self.txt_high_beta.setText(str(config.high_beta))
-                self.txt_low_gamma.setText(str(config.low_gamma))
-                self.txt_high_gamma.setText(str(config.high_gamma))
-                
-                print(f"Config loaded from {file_path}")
+                # Check if it's a full config or just base fault (for backward compatibility)
+                if "base_fault" in data:
+                    # New format with full configuration
+                    base_config = EegFaultModel.from_dict(data["base_fault"])
+                    multi_config = EegFaultModel.from_dict(data.get("multi_fault", {}))
+                    multi_count = data.get("multi_count", 1)
+                    
+                    # Update base fault fields dynamically
+                    for field_name, _ in self.EEG_FIELDS:
+                        value = getattr(base_config, field_name)
+                        field = getattr(self, f'txt_{field_name}')
+                        field.setText(str(value))
+                    
+                    # Update multiplier fields dynamically
+                    for field_name, _ in self.EEG_FIELDS:
+                        value = getattr(multi_config, field_name)
+                        field = getattr(self, f'txt_{field_name}_x')
+                        field.setText(str(value))
+                    
+                    # Update multi count
+                    self.txt_multi_count.setText(str(multi_count))
+                    
+                    print(f"✅ Full config loaded from {file_path}")
+                    print(f"   - Multi count: {multi_count}")
+                else:
+                    # Old format (only base fault) - for backward compatibility
+                    config = EegFaultModel.from_dict(data)
+                    
+                    # Update only base fault fields dynamically
+                    for field_name, _ in self.EEG_FIELDS:
+                        value = getattr(config, field_name)
+                        field = getattr(self, f'txt_{field_name}')
+                        field.setText(str(value))
+                    
+                    print(f"⚠️ Loaded old format config from {file_path} (base fault only)")
         except Exception as e:
-            print(f"Error loading config: {e}")
+            print(f"❌ Error loading config: {e}")
     
     def on_save_clicked(self):
-        """Handle save button click"""
-        config = self.get_config_fault()
+        """Handle save button click - saves full configuration"""
+        base_config = self.get_config_fault()
+        multi_config = self.get_config_fault_multi()
+        multi_count = self.get_multi_count()
         file_path = Path(self.txt_filepath.text())
         
         try:
             # Create directory if it doesn't exist
             file_path.parent.mkdir(parents=True, exist_ok=True)
             
+            # Save complete configuration
+            full_config = {
+                "base_fault": base_config.to_dict(),
+                "multi_fault": multi_config.to_dict(),
+                "multi_count": multi_count
+            }
+            
             with open(file_path, 'w', encoding='utf-8') as f:
-                json.dump(config.to_dict(), f, indent=2)
-                print(f"Config saved to {file_path}")
+                json.dump(full_config, f, indent=2)
+                print(f"✅ Config saved to {file_path}")
+                print(f"   - Base fault: {base_config.to_dict()}")
+                print(f"   - Multi fault: {multi_config.to_dict()}")
+                print(f"   - Multi count: {multi_count}")
         except Exception as e:
-            print(f"Error saving config: {e}")
+            print(f"❌ Error saving config: {e}")

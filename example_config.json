@@ -1,13 +1,29 @@
 {
-  "attention": 5,
-  "meditation": 10,
-  "signal": 0,
-  "delta": 300,
-  "theta": 300,
-  "low_alpha": 0,
-  "high_alpha": 0,
-  "low_beta": 0,
-  "high_beta": 0,
-  "low_gamma": 0,
-  "high_gamma": 0
+  "base_fault": {
+    "attention": 5,
+    "meditation": 10,
+    "signal": 0,
+    "delta": 300,
+    "theta": 300,
+    "low_alpha": 0,
+    "high_alpha": 0,
+    "low_beta": 0,
+    "high_beta": 0,
+    "low_gamma": 0,
+    "high_gamma": 0
+  },
+  "multi_fault": {
+    "attention": 1,
+    "meditation": 1,
+    "signal": 1,
+    "delta": 3,
+    "theta": 3,
+    "low_alpha": 3,
+    "high_alpha": 3,
+    "low_beta": 3,
+    "high_beta": 3,
+    "low_gamma": 3,
+    "high_gamma": 3
+  },
+  "multi_count": 8
 }

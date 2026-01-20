@@ -11,6 +11,7 @@ from typing import Optional
 # Using pybrainlink library for BrainLink device models
 from pybrainlink import BrainLinkModel, BrainLinkExtendModel
 from models.eeg_models import EegHistoryModel, ConfigParams, EegFaultModel
+from config_defaults import get_default_config, DEFAULT_HISTORY_PATH
 from services.history_service import HistoryService
 from services.mouse_service import MouseService
 from services.head_tracker_service import HeadTracker
@@ -34,8 +35,8 @@ class MainWindow(QMainWindow):
         self.head_tracker = HeadTracker()
         self.system_service = SystemService()
         
-        # Configuration
-        self.config = ConfigParams()
+        # Configuration - load defaults from config_defaults.py
+        self.config = get_default_config()
         
         # Child windows
         self.connect_form = None
@@ -149,7 +150,7 @@ class MainWindow(QMainWindow):
         
         file_layout = QHBoxLayout()
         file_layout.addWidget(QLabel("File Path:"))
-        self.txt_filepath = QLineEdit("C:/BLconfig/history.json")
+        self.txt_filepath = QLineEdit(DEFAULT_HISTORY_PATH)
         file_layout.addWidget(self.txt_filepath)
         
         self.btn_browse = QPushButton("Browse")
