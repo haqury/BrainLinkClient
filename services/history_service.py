@@ -5,6 +5,7 @@ import logging
 from typing import List, Dict
 from pathlib import Path
 from models.eeg_models import EegHistoryModel, ConfigParams, EegFaultModel
+from models.event_types import EventType
 
 logger = logging.getLogger(__name__)
 
@@ -82,17 +83,13 @@ class HistoryService:
             if not results:
                 continue
 
-            # Count events
+            # Count events using EventType enum
             counts = {
-                'ml': sum(1 for x in results if x.event_name == 'ml'),
-                'mr': sum(1 for x in results if x.event_name == 'mr'),
-                'mu': sum(1 for x in results if x.event_name == 'mu'),
-                'md': sum(1 for x in results if x.event_name == 'md'),
-                'stop': sum(1 for x in results if x.event_name == 'stop')
+                event_type.value: sum(1 for x in results if x.event_name == event_type.value)
+                for event_type in EventType
             }
 
-            logger.debug(f"Event counts - ml: {counts['ml']}, mr: {counts['mr']}, "
-                        f"mu: {counts['mu']}, md: {counts['md']}, stop: {counts['stop']}")
+            logger.debug(f"Event counts - {', '.join([f'{k}: {v}' for k, v in counts.items()])}")
 
             # Return most common event
             if counts:

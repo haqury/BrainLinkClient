@@ -9,6 +9,7 @@ from .eeg_models import (
 )
 from .gyro_models import GyroHistory
 from .system_models import SystemInfo
+from .event_types import EventType
 
 __all__ = [
     'BrainLinkModel',
@@ -17,5 +18,6 @@ __all__ = [
     'EegFaultModel',
     'ConfigParams',
     'GyroHistory',
-    'SystemInfo'
+    'SystemInfo',
+    'EventType'
 ]

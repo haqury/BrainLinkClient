@@ -6,6 +6,7 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt
 
+from models.event_types import EventType
 from services.head_tracker_service import HeadTracker
 from .styles import apply_brainlink_style
 
@@ -131,14 +132,12 @@ class GyroForm(QDialog):
             self.current_x, self.current_y, self.current_z
         )
         
-        # Convert direction to event name
-        if direction == "left":
-            return "ml"
-        elif direction == "right":
-            return "mr"
-        elif direction == "up":
-            return "mu"
-        elif direction == "down":
-            return "md"
+        # Convert direction to event name using EventType enum
+        direction_map = {
+            "left": EventType.MOVE_LEFT.value,
+            "right": EventType.MOVE_RIGHT.value,
+            "up": EventType.MOVE_UP.value,
+            "down": EventType.MOVE_DOWN.value
+        }
         
-        return ""
+        return direction_map.get(direction, "")

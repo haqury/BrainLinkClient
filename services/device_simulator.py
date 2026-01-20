@@ -133,9 +133,7 @@ class SimulatorController:
         # Set up callbacks
         self.simulator.on_eeg_data = self.main_window.on_eeg_data_event
         self.simulator.on_extend_data = self.main_window.on_extend_data_event
-        
-        if self.main_window.gyro_form:
-            self.simulator.on_gyro_data = self.main_window.gyro_form.update_gyro_data
+        self.simulator.on_gyro_data = self.main_window.on_gyro_data_event  # Always connect gyro
         
         # Start simulator
         self.simulator.start()

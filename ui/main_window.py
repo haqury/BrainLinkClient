@@ -14,6 +14,7 @@ from typing import Optional
 # Using pybrainlink library for BrainLink device models
 from pybrainlink import BrainLinkModel, BrainLinkExtendModel
 from models.eeg_models import EegHistoryModel, ConfigParams, EegFaultModel
+from models.event_types import EventType
 from config_defaults import get_default_config, DEFAULT_HISTORY_PATH
 from services.history_service import HistoryService
 from services.mouse_service import MouseService
@@ -316,17 +317,17 @@ class MainWindow(QMainWindow):
         self.lbl_counter.setText(str(self.history_service.count()))
 
     def get_event_name(self) -> str:
-        """Get currently selected event name"""
+        """Get currently selected event name using EventType enum"""
         if self.cb_ml.isChecked():
-            return "ml"
+            return EventType.MOVE_LEFT.value
         elif self.cb_mr.isChecked():
-            return "mr"
+            return EventType.MOVE_RIGHT.value
         elif self.cb_mu.isChecked():
-            return "mu"
+            return EventType.MOVE_UP.value
         elif self.cb_md.isChecked():
-            return "md"
+            return EventType.MOVE_DOWN.value
         elif self.cb_stop.isChecked():
-            return "stop"
+            return EventType.STOP.value
         return ""
 
     def set_config_fault(self, config: EegFaultModel, config_multi: EegFaultModel, multi_count: int):
@@ -382,10 +383,7 @@ class MainWindow(QMainWindow):
                 device = BrainLinkDevice()
                 device.on_eeg_data = self.on_eeg_data_event
                 device.on_extend_data = self.on_extend_data_event
-                
-                # Connect to gyro if form exists
-                if self.gyro_form:
-                    device.on_gyro_data = self.gyro_form.update_gyro_data
+                device.on_gyro_data = self.on_gyro_data_event  # Always connect gyro callback
                 
                 logger.info(f"Attempting to connect to device: {address}")
                 
@@ -512,15 +510,31 @@ class MainWindow(QMainWindow):
 
     def on_extend_data_event(self, model: BrainLinkExtendModel):
         """Handle extended data event (called from device)"""
+        logger.info(f"🔵 Extended data received from device:")
+        logger.info(f"   AP: {model.ap}")
+        logger.info(f"   Electric: {model.electric}")
+        logger.info(f"   Version: '{model.version}'")
+        logger.info(f"   Temperature: {model.temperature}")
+        logger.info(f"   Heart Rate: {model.heart_rate}")
+        logger.debug(f"   Raw model: {model.__dict__ if hasattr(model, '__dict__') else model}")
         self.extend_data_updated.emit(model)
 
     def on_extend_data_updated(self, model: BrainLinkExtendModel):
         """Handle extended data in main thread"""
+        logger.debug(f"Updating UI with extended data: ap={model.ap}, electric={model.electric}")
         self.lbl_ap.setText(str(model.ap))
         self.lbl_electric.setText(str(model.electric))
         self.lbl_version.setText(model.version)
         self.lbl_temp.setText(str(model.temperature))
         self.lbl_heart.setText(str(model.heart_rate))
+    
+    def on_gyro_data_event(self, x: int, y: int, z: int):
+        """Handle gyro data event (called from device) - forward to gyro form if it exists"""
+        logger.debug(f"Gyro data received: X={x}, Y={y}, Z={z}")
+        if self.gyro_form:
+            self.gyro_form.update_gyro_data(x, y, z)
+        else:
+            logger.debug("Gyro form not open - data not displayed")
 
     def closeEvent(self, event):
         """Handle window close event with proper resource cleanup"""

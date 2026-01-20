@@ -1,9 +1,13 @@
 """Mouse control service"""
 
+import logging
 import pyautogui
 import threading
 from typing import Optional
 from models.eeg_models import EegHistoryModel, ConfigParams
+from models.event_types import EventType
+
+logger = logging.getLogger(__name__)
 
 
 class MouseService:
@@ -37,7 +41,7 @@ class MouseService:
             self._timer.cancel()
             self._timer = None
 
-        if event_name and event_name != "stop" and is_use:
+        if event_name and event_name != EventType.STOP.value and is_use:
             self._stop_flag = False
             self._current_event = event_name
             self._start_continuous_movement()
@@ -59,16 +63,16 @@ class MouseService:
         try:
             current_x, current_y = pyautogui.position()
 
-            if event == "ml":  # Move left
+            if event == EventType.MOVE_LEFT.value:  # Move left
                 pyautogui.moveTo(current_x - 1, current_y)
-            elif event == "mr":  # Move right
+            elif event == EventType.MOVE_RIGHT.value:  # Move right
                 pyautogui.moveTo(current_x + 1, current_y)
-            elif event == "md":  # Move down
+            elif event == EventType.MOVE_DOWN.value:  # Move down
                 pyautogui.moveTo(current_x, current_y + 1)
-            elif event == "mu":  # Move up
+            elif event == EventType.MOVE_UP.value:  # Move up
                 pyautogui.moveTo(current_x, current_y - 1)
         except Exception as e:
-            print(f"Error moving mouse: {e}")
+            logger.error(f"Error moving mouse: {e}", exc_info=True)
 
     def stop(self):
         """Stop all mouse movements"""
