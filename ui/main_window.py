@@ -6,7 +6,7 @@ import threading
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QCheckBox, QLineEdit, QFileDialog, QGroupBox, QMessageBox,
-    QSystemTrayIcon
+    QSystemTrayIcon, QComboBox
 )
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from pynput import keyboard
@@ -23,6 +23,8 @@ from services.head_tracker_service import HeadTracker
 from services.system_service import SystemService
 from services.ml_trainer_service import MLTrainerService
 from services.ml_predictor_service import MLPredictorService
+from services.device_manager_service import DeviceManagerService, DeviceInfo
+from services.shared_memory_service import SharedMemoryService
 from .styles import apply_brainlink_style
 from .tray_icon import TrayIcon
 
@@ -46,6 +48,10 @@ class MainWindow(QMainWindow):
         self.mouse_service = MouseService()
         self.head_tracker = HeadTracker()
         self.system_service = SystemService()
+        self.device_manager = DeviceManagerService()
+        
+        # Shared Memory for game integration
+        self.shared_memory = SharedMemoryService()
         
         # ML Services
         self.ml_trainer = MLTrainerService()
@@ -94,10 +100,24 @@ class MainWindow(QMainWindow):
         self.connection_error.connect(self.on_connection_error)
         self.connection_success.connect(self.on_connection_success)
         
+        # Device manager signals
+        self.device_manager.devices_updated.connect(self.on_devices_updated)
+        self.device_manager.scan_started.connect(self.on_scan_started)
+        self.device_manager.scan_finished.connect(self.on_scan_finished)
+        
+        # Shared memory signals
+        self.shared_memory.service_started.connect(self.on_shm_started)
+        self.shared_memory.service_stopped.connect(self.on_shm_stopped)
+        self.shared_memory.error_occurred.connect(self.on_shm_error)
+        self.shared_memory.command_received.connect(self.on_shm_command_received)
+        
         # Show tray icon
         self.tray_icon.show()
         
         logger.info("MainWindow initialized with system tray")
+        
+        # Initialize devices on startup
+        QTimer.singleShot(500, self.initialize_devices)
 
     def init_ui(self):
         """Initialize the user interface"""
@@ -118,9 +138,24 @@ class MainWindow(QMainWindow):
         connection_group = QGroupBox("Connection")
         connection_layout = QHBoxLayout()
         
-        self.btn_start = QPushButton("Start & Connect")
-        self.btn_start.clicked.connect(self.on_start_clicked)
-        connection_layout.addWidget(self.btn_start)
+        connection_layout.addWidget(QLabel("Device:"))
+        
+        self.cmb_devices = QComboBox()
+        self.cmb_devices.setMinimumWidth(250)
+        self.cmb_devices.currentIndexChanged.connect(self.on_device_selected)
+        connection_layout.addWidget(self.cmb_devices)
+        
+        self.btn_rescan = QPushButton("🔄 Rescan")
+        self.btn_rescan.setToolTip("Rescan for Bluetooth devices")
+        self.btn_rescan.clicked.connect(self.on_rescan_clicked)
+        connection_layout.addWidget(self.btn_rescan)
+        
+        self.btn_disconnect = QPushButton("Disconnect")
+        self.btn_disconnect.setEnabled(False)
+        self.btn_disconnect.clicked.connect(self.disconnect_device)
+        connection_layout.addWidget(self.btn_disconnect)
+        
+        connection_layout.addStretch()
         
         connection_group.setLayout(connection_layout)
         main_layout.addWidget(connection_group)
@@ -188,6 +223,27 @@ class MainWindow(QMainWindow):
         
         control_group.setLayout(control_layout)
         main_layout.addWidget(control_group)
+        
+        # Shared Memory section (for game integration)
+        shm_group = QGroupBox("Game Integration (Shared Memory)")
+        shm_layout = QHBoxLayout()
+        
+        self.chk_enable_shm = QCheckBox("Enable Shared Memory")
+        self.chk_enable_shm.setToolTip("Ultra-fast game integration via shared memory (~0.01ms latency)")
+        self.chk_enable_shm.stateChanged.connect(self.on_shm_toggled)
+        shm_layout.addWidget(self.chk_enable_shm)
+        
+        self.lbl_shm_status = QLabel("Status: Stopped")
+        self.lbl_shm_status.setStyleSheet("color: #888;")
+        shm_layout.addWidget(self.lbl_shm_status)
+        
+        self.lbl_shm_updates = QLabel("Updates: 0")
+        shm_layout.addWidget(self.lbl_shm_updates)
+        
+        shm_layout.addStretch()
+        
+        shm_group.setLayout(shm_layout)
+        main_layout.addWidget(shm_group)
         
         # History section
         history_group = QGroupBox("History Management")
@@ -293,11 +349,147 @@ class MainWindow(QMainWindow):
         )
         self.keyboard_listener.start()
 
-    def on_start_clicked(self):
-        """Handle start button click - open device connection dialog"""
-        from ui.connect_form import ConnectForm
-        self.connect_form = ConnectForm(self)
-        self.connect_form.show()
+    def initialize_devices(self):
+        """Initialize device list on startup"""
+        # Check if Bluetooth is available
+        bt_available, bt_message = DeviceManagerService.check_bluetooth_available()
+        
+        if not bt_available:
+            logger.warning(f"Bluetooth not available: {bt_message}")
+            reply = QMessageBox.question(
+                self,
+                "Bluetooth Not Available",
+                f"{bt_message}\n\n"
+                f"Would you like to enable Bluetooth?\n\n"
+                f"Note: You may need to enable it in Windows Settings.",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes
+            )
+            
+            if reply == QMessageBox.Yes:
+                QMessageBox.information(
+                    self,
+                    "Enable Bluetooth",
+                    "Please enable Bluetooth in Windows Settings.\n\n"
+                    "After enabling, click 'Rescan' button to search for devices."
+                )
+        
+        # Start initial scan
+        logger.info("Starting initial device scan...")
+        self.device_manager.start_scan()
+    
+    def on_devices_updated(self, devices: list):
+        """Handle device list update"""
+        logger.info(f"Devices updated: {len(devices)} devices")
+        
+        # Block signals while updating
+        self.cmb_devices.blockSignals(True)
+        
+        # Remember current selection
+        current_address = None
+        if self.cmb_devices.currentIndex() >= 0:
+            current_data = self.cmb_devices.currentData()
+            if current_data:
+                current_address = current_data.address
+        
+        # Clear and repopulate
+        self.cmb_devices.clear()
+        
+        for device in devices:
+            self.cmb_devices.addItem(str(device), device)
+        
+        # Try to restore selection
+        if current_address:
+            for i in range(self.cmb_devices.count()):
+                device = self.cmb_devices.itemData(i)
+                if device and device.address == current_address:
+                    self.cmb_devices.setCurrentIndex(i)
+                    break
+        else:
+            # Select last device if available
+            last_device = self.device_manager.get_last_device()
+            if last_device:
+                for i in range(self.cmb_devices.count()):
+                    device = self.cmb_devices.itemData(i)
+                    if device and device.address == last_device.address:
+                        self.cmb_devices.setCurrentIndex(i)
+                        logger.info(f"Selected last device: {last_device}")
+                        break
+        
+        # Unblock signals
+        self.cmb_devices.blockSignals(False)
+        
+        # Auto-connect if scan just finished and we have a selection
+        if self.cmb_devices.currentIndex() >= 0:
+            selected_device = self.cmb_devices.currentData()
+            if selected_device and not selected_device.is_simulator:
+                # Auto-connect after scan if not simulator
+                last_device = self.device_manager.get_last_device()
+                if last_device and last_device.address == selected_device.address:
+                    logger.info(f"Auto-connecting to last device: {selected_device}")
+                    QTimer.singleShot(1000, lambda: self.on_device_selected(self.cmb_devices.currentIndex()))
+    
+    def on_scan_started(self):
+        """Handle scan start"""
+        self.btn_rescan.setEnabled(False)
+        self.btn_rescan.setText("🔄 Scanning...")
+        self.cmb_devices.setEnabled(False)
+        logger.info("Device scan started")
+    
+    def on_scan_finished(self):
+        """Handle scan finish"""
+        self.btn_rescan.setEnabled(True)
+        self.btn_rescan.setText("🔄 Rescan")
+        self.cmb_devices.setEnabled(True)
+        logger.info("Device scan finished")
+    
+    def on_device_selected(self, index: int):
+        """Handle device selection - auto connect"""
+        if index < 0:
+            return
+        
+        device = self.cmb_devices.itemData(index)
+        if not device:
+            return
+        
+        logger.info(f"Device selected: {device}")
+        
+        # Save as last device
+        self.device_manager.save_last_device(device)
+        
+        # Disconnect if already connected
+        if self._is_connected:
+            logger.info("Disconnecting previous device before connecting new one")
+            self.disconnect_device()
+            # Wait a bit before connecting
+            QTimer.singleShot(500, lambda: self._connect_to_device(device))
+        else:
+            self._connect_to_device(device)
+    
+    def _connect_to_device(self, device: DeviceInfo):
+        """Internal method to connect to selected device"""
+        if device.is_simulator:
+            # Connect to simulator
+            logger.info("Connecting to simulator...")
+            from services.device_simulator import SimulatorController
+            self.simulator = SimulatorController(self)
+            self.simulator.connect()
+            
+            QMessageBox.information(
+                self,
+                "Simulator Started",
+                "✅ Device simulator is now running!\n\n"
+                "You should see EEG data updating."
+            )
+        else:
+            # Connect to real device
+            logger.info(f"Connecting to real device: {device.address}")
+            self.connect_device(device.address)
+    
+    def on_rescan_clicked(self):
+        """Handle rescan button click"""
+        logger.info("Rescan requested")
+        self.device_manager.start_scan()
 
     def on_minimize_to_tray_changed(self, state):
         """Handle minimize to tray checkbox state change"""
@@ -363,6 +555,156 @@ class MainWindow(QMainWindow):
         
         self.ml_control_form.update_status()
 
+    def on_shm_toggled(self, state):
+        """Handle shared memory toggle"""
+        if state == Qt.Checked:
+            try:
+                self.shared_memory.start()
+            except Exception as e:
+                logger.error(f"Failed to start shared memory service: {e}", exc_info=True)
+                self.chk_enable_shm.setChecked(False)
+                QMessageBox.critical(
+                    self,
+                    "Shared Memory Error",
+                    f"Failed to start shared memory service:\n{e}\n\n"
+                    f"This feature requires Python multiprocessing support."
+                )
+        else:
+            self.shared_memory.stop()
+    
+    def on_shm_started(self, memory_name: str):
+        """Handle shared memory service started"""
+        self.lbl_shm_status.setText(f"Status: Running ('{memory_name}')")
+        self.lbl_shm_status.setStyleSheet("color: green; font-weight: bold;")
+        logger.info(f"Shared memory service started: {memory_name}")
+        
+        # Show notification
+        self.tray_icon.show_message(
+            "Shared Memory",
+            f"Game integration enabled (memory: '{memory_name}')\n"
+            f"Latency: ~0.01-0.05ms",
+            QSystemTrayIcon.Information
+        )
+    
+    def on_shm_stopped(self):
+        """Handle shared memory service stopped"""
+        self.lbl_shm_status.setText("Status: Stopped")
+        self.lbl_shm_status.setStyleSheet("color: #888;")
+        self.lbl_shm_updates.setText("Updates: 0")
+        logger.info("Shared memory service stopped")
+    
+    def on_shm_error(self, error_msg: str):
+        """Handle shared memory error"""
+        logger.error(f"Shared memory error: {error_msg}")
+        QMessageBox.warning(
+            self,
+            "Shared Memory Error",
+            f"Shared memory error:\n{error_msg}"
+        )
+    
+    def on_shm_command_received(self, command: dict):
+        """Handle command received from game client via shared memory"""
+        try:
+            command_type = command.get("type", 0)
+            event_name = command.get("event", "")
+            
+            if not event_name:
+                logger.warning("Received command with empty event name")
+                return
+            
+            logger.info(f"Processing command from game: type={command_type}, event={event_name}")
+            
+            # Type 1: Save event to history
+            if command_type == 1:
+                # Get current EEG data from device
+                if hasattr(self, 'device') and self.device and hasattr(self.device, 'model'):
+                    model = self.device.model
+                    
+                    # Create history record with event
+                    from models.eeg_models import EegHistoryModel
+                    h = EegHistoryModel(
+                        attention=model.attention,
+                        meditation=model.meditation,
+                        delta=model.delta,
+                        theta=model.theta,
+                        low_alpha=model.low_alpha,
+                        high_alpha=model.high_alpha,
+                        low_beta=model.low_beta,
+                        high_beta=model.high_beta,
+                        low_gamma=model.low_gamma,
+                        high_gamma=model.high_gamma,
+                        event_name=event_name
+                    )
+                    
+                    self.history_service.add(h)
+                    self.update_counter()
+                    logger.info(f"Saved event '{event_name}' to history from game")
+                    
+                    # Update status in tray
+                    self.tray_icon.show_message(
+                        "Event Saved",
+                        f"Game saved event: {event_name}",
+                        QSystemTrayIcon.Information
+                    )
+                else:
+                    logger.warning("No active device, cannot save event with current EEG data")
+            
+            # Type 2: Save for ML training
+            elif command_type == 2:
+                # Get current EEG data
+                if hasattr(self, 'device') and self.device and hasattr(self.device, 'model'):
+                    model = self.device.model
+                    
+                    # Create training sample
+                    from models.ml_models import MLTrainingData
+                    training_sample = MLTrainingData(
+                        attention=model.attention,
+                        meditation=model.meditation,
+                        delta=model.delta,
+                        theta=model.theta,
+                        low_alpha=model.low_alpha,
+                        high_alpha=model.high_alpha,
+                        low_beta=model.low_beta,
+                        high_beta=model.high_beta,
+                        low_gamma=model.low_gamma,
+                        high_gamma=model.high_gamma,
+                        event=event_name
+                    )
+                    
+                    self.ml_trainer.add_training_sample(training_sample)
+                    logger.info(f"Added ML training sample '{event_name}' from game")
+                    
+                    # Also save to history
+                    h = EegHistoryModel(
+                        attention=model.attention,
+                        meditation=model.meditation,
+                        delta=model.delta,
+                        theta=model.theta,
+                        low_alpha=model.low_alpha,
+                        high_alpha=model.high_alpha,
+                        low_beta=model.low_beta,
+                        high_beta=model.high_beta,
+                        low_gamma=model.low_gamma,
+                        high_gamma=model.high_gamma,
+                        event_name=event_name
+                    )
+                    self.history_service.add(h)
+                    self.update_counter()
+                    
+                    self.tray_icon.show_message(
+                        "ML Training Data",
+                        f"Game added training sample: {event_name}",
+                        QSystemTrayIcon.Information
+                    )
+                else:
+                    logger.warning("No active device, cannot save ML training data")
+            
+            else:
+                logger.warning(f"Unknown command type: {command_type}")
+        
+        except Exception as e:
+            logger.error(f"Error processing shared memory command: {e}", exc_info=True)
+    
     def update_counter(self):
         """Update history counter display"""
         self.lbl_counter.setText(str(self.history_service.count()))
@@ -486,6 +828,10 @@ class MainWindow(QMainWindow):
         """Disconnect from device and clean up resources"""
         logger.info("Disconnecting from device")
         
+        # Update UI
+        self.btn_disconnect.setEnabled(False)
+        self.cmb_devices.setEnabled(True)
+        
         if self._connection_loop and self._connection_loop.is_running():
             try:
                 logger.debug("Stopping connection event loop")
@@ -528,6 +874,11 @@ class MainWindow(QMainWindow):
     def on_connection_success(self, address: str):
         """Handle successful connection signal (called in main thread)"""
         logger.info(f"Connection successful in UI: {address}")
+        
+        # Update UI
+        self.btn_disconnect.setEnabled(True)
+        self.cmb_devices.setEnabled(False)  # Disable device selection while connected
+        
         QMessageBox.information(
             self,
             "Connected",
@@ -610,6 +961,28 @@ class MainWindow(QMainWindow):
             self.ml_trainer.add_training_sample(training_sample)
             logger.debug(f"Added training sample for event: {event_name}")
             self.update_counter()
+        
+        # Update shared memory if enabled
+        if self.shared_memory.is_running:
+            eeg_data = {
+                "attention": model.attention,
+                "meditation": model.meditation,
+                "signal": model.signal,
+                "delta": model.delta,
+                "theta": model.theta,
+                "low_alpha": model.low_alpha,
+                "high_alpha": model.high_alpha,
+                "low_beta": model.low_beta,
+                "high_beta": model.high_beta,
+                "low_gamma": model.low_gamma,
+                "high_gamma": model.high_gamma,
+                "event": event_name
+            }
+            self.shared_memory.update_eeg_data(eeg_data)
+            
+            # Update UI counter
+            stats = self.shared_memory.get_stats()
+            self.lbl_shm_updates.setText(f"Updates: {stats['updates_sent']}")
 
     def on_extend_data_event(self, model: BrainLinkExtendModel):
         """Handle extended data event (called from device)"""
@@ -630,6 +1003,15 @@ class MainWindow(QMainWindow):
         self.lbl_version.setText(model.version)
         self.lbl_temp.setText(str(model.temperature))
         self.lbl_heart.setText(str(model.heart_rate))
+        
+        # Update shared memory if enabled
+        if self.shared_memory.is_running:
+            self.shared_memory.update_extended_data(
+                ap=model.ap,
+                electric=model.electric,
+                temp=model.temperature,
+                heart=model.heart_rate
+            )
     
     def on_gyro_data_event(self, x: int, y: int, z: int):
         """Handle gyro data event (called from device) - forward to gyro form if it exists"""
@@ -638,6 +1020,10 @@ class MainWindow(QMainWindow):
             self.gyro_form.update_gyro_data(x, y, z)
         else:
             logger.debug("Gyro form not open - data not displayed")
+        
+        # Update shared memory if enabled
+        if self.shared_memory.is_running:
+            self.shared_memory.update_gyro_data(x, y, z)
 
     def closeEvent(self, event):
         """Handle window close event - minimize to tray or quit"""
