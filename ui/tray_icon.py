@@ -47,16 +47,17 @@ class TrayIcon(QObject):
             if icon.isNull():
                 raise FileNotFoundError("Icon file not found")
             self.tray_icon.setIcon(icon)
-            logger.info("Loaded custom tray icon")
-        except:
-            # Use default Qt icon as fallback
+            logger.info("Loaded custom tray icon from resources/icon.png")
+        except Exception as e:
+            # Use more visible Qt icon as fallback
             from PyQt5.QtWidgets import QStyle, QApplication
             style = QApplication.style()
-            icon = style.standardIcon(QStyle.SP_ComputerIcon)
+            # Use MessageBoxInformation icon - more visible than Computer
+            icon = style.standardIcon(QStyle.SP_MessageBoxInformation)
             self.tray_icon.setIcon(icon)
-            logger.info("Using default tray icon")
+            logger.info(f"Using default tray icon (MessageBoxInformation): {e}")
         
-        self.tray_icon.setToolTip("BrainLink Client")
+        self.tray_icon.setToolTip("BrainLink Client - Double-click to show")
     
     def _create_menu(self):
         """Create tray icon context menu"""
