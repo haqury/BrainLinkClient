@@ -70,9 +70,15 @@ class MLConfig:
     # Training settings
     test_size: float = 0.2
     min_samples_per_class: int = 10
+    min_classes_required: int = 2  # Minimum number of event classes needed for training
+    
+    # Auto-training settings
+    auto_train_enabled: bool = True  # Enable automatic training when new samples added
+    auto_train_min_new_samples: int = 5  # Minimum new samples before auto-training
     
     # Prediction settings
     confidence_threshold: float = 0.6  # Minimum confidence for prediction
+    invert_ml_mr: bool = False  # Invert ml/mr predictions (fix if model predicts backwards)
     
     # File paths
     model_path: str = "models_ml/brainlink_classifier.pkl"

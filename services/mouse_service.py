@@ -41,10 +41,21 @@ class MouseService:
             self._timer.cancel()
             self._timer = None
 
-        if event_name and event_name != EventType.STOP.value and is_use:
+        # Clear current event if no event or stop event
+        if not event_name or event_name == EventType.STOP.value:
+            self._stop_flag = True
+            self._current_event = ""
+            return
+
+        # Start movement only if event is valid and control is enabled
+        if is_use:
             self._stop_flag = False
             self._current_event = event_name
             self._start_continuous_movement()
+        else:
+            # Control disabled - stop movement
+            self._stop_flag = True
+            self._current_event = ""
 
     def _start_continuous_movement(self):
         """Start continuous mouse movement"""

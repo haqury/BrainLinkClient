@@ -164,6 +164,18 @@ class DeviceManagerService(QObject):
         """Get last connected device from config"""
         return self.last_device
     
+    def stop_scan(self):
+        """Stop scanning for devices"""
+        if self.scanner and self.scanner.isRunning():
+            logger.info("Stopping device scan")
+            self.scanner.terminate()
+            self.scanner.wait(1000)  # Wait up to 1 second
+            if self.scanner.isRunning():
+                logger.warning("Force stopping scanner thread")
+                self.scanner.terminate()
+                self.scanner.wait(500)
+            self.scanner = None
+    
     def _save_config(self):
         """Save configuration to file"""
         try:

@@ -189,13 +189,38 @@ class SharedMemoryService(QObject):
             logger.error(f"Error stopping shared memory service: {e}", exc_info=True)
             self.error_occurred.emit(f"Failed to stop: {e}")
     
-    def _write_int(self, offset: int, value: int):
-        """Write int32 value to shared memory (must be called within lock!)"""
+    def _write_int(self, offset: int, value):
+        """
+        Write int32 value to shared memory (must be called within lock!)
+        
+        Args:
+            offset: Field offset (in int32 units)
+            value: Value to write (will be converted to int)
+        """
         if not self.shm:
             return
         
+        # Ensure value is int (handle float, None, etc.)
+        try:
+            if value is None:
+                int_value = 0
+            elif isinstance(value, float):
+                int_value = int(round(value))
+            elif isinstance(value, str):
+                # Try to convert string to int
+                try:
+                    int_value = int(float(value))
+                except (ValueError, TypeError):
+                    logger.warning(f"Cannot convert '{value}' to int, using 0")
+                    int_value = 0
+            else:
+                int_value = int(value)
+        except (ValueError, TypeError) as e:
+            logger.error(f"Error converting value to int: {e} (value={value}, type={type(value)})")
+            int_value = 0
+        
         byte_offset = offset * 4
-        self.shm.buf[byte_offset:byte_offset + 4] = struct.pack('i', value)
+        self.shm.buf[byte_offset:byte_offset + 4] = struct.pack('i', int_value)
     
     def _update_timestamp(self):
         """Update timestamp in shared memory"""
@@ -237,7 +262,38 @@ class SharedMemoryService(QObject):
                 # Event (convert string to code)
                 event_name = data.get("event", "")
                 event_code = EVENT_TO_CODE.get(event_name, 0)
+                
+                # Log event changes for debugging (only occasionally to avoid spam)
+                if not hasattr(self, '_last_logged_event'):
+                    self._last_logged_event = ""
+                    self._event_log_counter = 0
+                
+                self._event_log_counter += 1
+                if event_name != self._last_logged_event:
+                    if event_code != 0:  # Only log non-empty events
+                        logger.info(f"📤 Shared memory event sent: {event_name} (code: {event_code})")
+                    elif event_name == "":
+                        logger.debug(f"📤 Shared memory: Event cleared (was: '{self._last_logged_event}')")
+                    self._last_logged_event = event_name
+                elif self._event_log_counter % 100 == 0 and event_code != 0:  # Log every 100 updates
+                    logger.info(f"📤 Shared memory event: {event_name} (code: {event_code}) - still active")
+                # Always write event, even if it hasn't changed (to ensure it persists)
+                
+                # Write event code to shared memory (always, even if event doesn't change)
+                # This ensures events persist in shared memory until explicitly changed
                 self._write_int(self.layout.EVENT_CODE, event_code)
+                
+                # Verify write by reading back (for debugging)
+                if event_code != 0 and self._event_log_counter % 60 == 0:  # Check every second at 60fps
+                    read_back = self._read_int(self.layout.EVENT_CODE)
+                    if read_back != event_code:
+                        logger.warning(f"📤 Shared memory: Event write mismatch! Wrote {event_code} but read back {read_back}")
+                    else:
+                        logger.debug(f"📤 Shared memory: Event '{event_name}' (code: {event_code}) verified in shared memory")
+                
+                # Log periodically to verify events are being written
+                if self._event_log_counter % 300 == 0 and event_code != 0:  # Log every 5 seconds at 60fps
+                    logger.info(f"📤 Shared memory: Event '{event_name}' (code: {event_code}) still active in shared memory")
                 
                 self.updates_sent += 1
         
@@ -263,25 +319,29 @@ class SharedMemoryService(QObject):
         except Exception as e:
             logger.error(f"Error updating gyro data: {e}", exc_info=True)
     
-    def update_extended_data(self, ap: int, electric: int, temp: int, heart: int):
+    def update_extended_data(self, ap=None, electric=None, temp=None, heart=None):
         """
         Update extended data in shared memory
         
         Args:
-            ap, electric, temp, heart: Extended data values
+            ap: AP value (int or float, will be converted to int)
+            electric: Electric value (int or float, will be converted to int)
+            temp: Temperature value (int or float, will be converted to int)
+            heart: Heart rate value (int or float, will be converted to int)
         """
         if not self.is_running or not self.shm or not self.lock:
             return
         
         try:
             with self.lock:
-                self._write_int(self.layout.AP, ap)
-                self._write_int(self.layout.ELECTRIC, electric)
-                self._write_int(self.layout.TEMP, temp)
-                self._write_int(self.layout.HEART, heart)
+                # _write_int will handle conversion to int (including float values)
+                self._write_int(self.layout.AP, ap if ap is not None else 0)
+                self._write_int(self.layout.ELECTRIC, electric if electric is not None else 0)
+                self._write_int(self.layout.TEMP, temp if temp is not None else 0)
+                self._write_int(self.layout.HEART, heart if heart is not None else 0)
         
         except Exception as e:
-            logger.error(f"Error updating extended data: {e}", exc_info=True)
+            logger.error(f"Error updating extended data: {e} (ap={ap}, electric={electric}, temp={temp}, heart={heart})", exc_info=True)
     
     def _check_commands(self):
         """Check for incoming commands from clients (called by timer)"""

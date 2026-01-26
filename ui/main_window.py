@@ -54,7 +54,7 @@ class MainWindow(QMainWindow):
         self.shared_memory = SharedMemoryService()
         
         # ML Services
-        self.ml_trainer = MLTrainerService()
+        self.ml_trainer = MLTrainerService(parent=self)
         self.ml_predictor = MLPredictorService(self.ml_trainer)
         self._use_ml_prediction = False  # Flag to switch between rule-based and ML prediction
         
@@ -111,6 +111,12 @@ class MainWindow(QMainWindow):
         self.shared_memory.error_occurred.connect(self.on_shm_error)
         self.shared_memory.command_received.connect(self.on_shm_command_received)
         
+        # ML trainer signals (auto-training)
+        self.ml_trainer.auto_training_started.connect(self.on_auto_training_started)
+        self.ml_trainer.auto_training_completed.connect(self.on_auto_training_completed)
+        self.ml_trainer.auto_training_failed.connect(self.on_auto_training_failed)
+        self.ml_trainer.model_updated.connect(self.on_model_updated)
+        
         # Show tray icon
         self.tray_icon.show()
         
@@ -118,6 +124,15 @@ class MainWindow(QMainWindow):
         
         # Initialize devices on startup
         QTimer.singleShot(500, self.initialize_devices)
+        
+        # Auto-start Shared Memory if enabled (default)
+        # Note: chk_enable_game_control will be enabled automatically when shared memory starts
+        if self.chk_enable_shm.isChecked():
+            QTimer.singleShot(1000, lambda: self.on_shm_toggled(Qt.Checked))
+        else:
+            # If shared memory is not enabled, disable game control
+            if hasattr(self, 'chk_enable_game_control'):
+                self.chk_enable_game_control.setEnabled(False)
 
     def init_ui(self):
         """Initialize the user interface"""
@@ -210,15 +225,22 @@ class MainWindow(QMainWindow):
         control_group = QGroupBox("Control Options")
         control_layout = QHBoxLayout()
         
-        self.cb_autouse = QCheckBox("Auto Use (Direct Control)")
+        self.cb_autouse = QCheckBox("Enable Mouse Control")
+        self.cb_autouse.setToolTip("Enable automatic mouse control based on EEG events")
         self.cb_use_key = QCheckBox("Use Key Control")
         self.chk_minimize_to_tray = QCheckBox("Minimize to tray")
         self.chk_minimize_to_tray.setChecked(True)
         self.chk_minimize_to_tray.setToolTip("Minimize to system tray instead of closing")
         self.chk_minimize_to_tray.stateChanged.connect(self.on_minimize_to_tray_changed)
         
+        self.chk_use_ml_prediction = QCheckBox("Use ML Prediction")
+        self.chk_use_ml_prediction.setToolTip("Use ML model predictions instead of rule-based detection (requires trained model)")
+        self.chk_use_ml_prediction.setChecked(False)
+        self.chk_use_ml_prediction.stateChanged.connect(self.on_use_ml_prediction_changed)
+        
         control_layout.addWidget(self.cb_autouse)
         control_layout.addWidget(self.cb_use_key)
+        control_layout.addWidget(self.chk_use_ml_prediction)
         control_layout.addWidget(self.chk_minimize_to_tray)
         
         control_group.setLayout(control_layout)
@@ -226,21 +248,69 @@ class MainWindow(QMainWindow):
         
         # Shared Memory section (for game integration)
         shm_group = QGroupBox("Game Integration (Shared Memory)")
-        shm_layout = QHBoxLayout()
+        shm_layout = QVBoxLayout()
         
+        # First row: Enable Shared Memory
+        shm_row1 = QHBoxLayout()
         self.chk_enable_shm = QCheckBox("Enable Shared Memory")
         self.chk_enable_shm.setToolTip("Ultra-fast game integration via shared memory (~0.01ms latency)")
+        self.chk_enable_shm.setChecked(True)  # Enabled by default
         self.chk_enable_shm.stateChanged.connect(self.on_shm_toggled)
-        shm_layout.addWidget(self.chk_enable_shm)
+        shm_row1.addWidget(self.chk_enable_shm)
         
         self.lbl_shm_status = QLabel("Status: Stopped")
         self.lbl_shm_status.setStyleSheet("color: #888;")
-        shm_layout.addWidget(self.lbl_shm_status)
+        shm_row1.addWidget(self.lbl_shm_status)
         
         self.lbl_shm_updates = QLabel("Updates: 0")
-        shm_layout.addWidget(self.lbl_shm_updates)
+        shm_row1.addWidget(self.lbl_shm_updates)
         
-        shm_layout.addStretch()
+        self.lbl_shm_event_source = QLabel("Event: -")
+        self.lbl_shm_event_source.setStyleSheet("color: #888; font-size: 9pt;")
+        self.lbl_shm_event_source.setToolTip("Current event source: ML prediction or rule-based")
+        shm_row1.addWidget(self.lbl_shm_event_source)
+        
+        shm_row1.addStretch()
+        shm_layout.addLayout(shm_row1)
+        
+        # Second row: Game control and auto-save options
+        shm_row2 = QHBoxLayout()
+        
+        # Game control checkbox (separate from mouse control)
+        self.chk_enable_game_control = QCheckBox("Enable Game Control")
+        self.chk_enable_game_control.setToolTip(
+            "Enable BrainLink control in games via shared memory (sends events to games).\n"
+            "⚠️ Requires 'Enable Shared Memory' to be checked above!"
+        )
+        self.chk_enable_game_control.setChecked(True)  # Enabled by default
+        # Disable if shared memory is not running
+        self.chk_enable_game_control.setEnabled(self.shared_memory.is_running)
+        shm_row2.addWidget(self.chk_enable_game_control)
+        
+        self.chk_accept_game_commands = QCheckBox("Accept commands from games")
+        self.chk_accept_game_commands.setToolTip("Automatically save game events to history/ML training when received")
+        self.chk_accept_game_commands.setChecked(True)  # Enabled by default
+        self.chk_accept_game_commands.stateChanged.connect(self.on_accept_game_commands_changed)
+        shm_row2.addWidget(self.chk_accept_game_commands)
+        
+        self.chk_auto_save_history = QCheckBox("Auto-save to history")
+        self.chk_auto_save_history.setToolTip("Automatically save game events to history (Type 1 commands)")
+        self.chk_auto_save_history.setChecked(True)  # Enabled by default
+        shm_row2.addWidget(self.chk_auto_save_history)
+        
+        self.chk_auto_save_ml = QCheckBox("Auto-save for ML training")
+        self.chk_auto_save_ml.setToolTip("Automatically save game events for ML training (Type 2 commands)")
+        self.chk_auto_save_ml.setChecked(False)  # Disabled by default
+        shm_row2.addWidget(self.chk_auto_save_ml)
+        
+        self.chk_auto_train = QCheckBox("Auto-train model")
+        self.chk_auto_train.setToolTip("Automatically retrain ML model when new training samples are collected")
+        self.chk_auto_train.setChecked(True)  # Enabled by default
+        self.chk_auto_train.stateChanged.connect(self.on_auto_train_changed)
+        shm_row2.addWidget(self.chk_auto_train)
+        
+        shm_row2.addStretch()
+        shm_layout.addLayout(shm_row2)
         
         shm_group.setLayout(shm_layout)
         main_layout.addWidget(shm_group)
@@ -494,6 +564,56 @@ class MainWindow(QMainWindow):
     def on_minimize_to_tray_changed(self, state):
         """Handle minimize to tray checkbox state change"""
         self._minimize_to_tray = (state == Qt.Checked)
+    
+    def on_use_ml_prediction_changed(self, state):
+        """Handle use ML prediction checkbox state change"""
+        enabled = state == Qt.Checked
+        
+        if enabled:
+            # Check if ML model is ready
+            if not self.ml_predictor.is_ready():
+                QMessageBox.warning(
+                    self,
+                    "ML Model Not Ready",
+                    "ML model is not trained yet.\n\n"
+                    "Please train a model first using 'ML Control' button."
+                )
+                self.chk_use_ml_prediction.blockSignals(True)
+                self.chk_use_ml_prediction.setChecked(False)
+                self.chk_use_ml_prediction.blockSignals(False)
+                return
+            
+            # Test prediction
+            try:
+                from pybrainlink import BrainLinkModel
+                test_model = BrainLinkModel()
+                test_prediction = self.ml_predictor.predict(test_model)
+                if test_prediction is None:
+                    raise ValueError("Test prediction returned None")
+            except Exception as e:
+                logger.error(f"ML prediction test failed: {e}", exc_info=True)
+                QMessageBox.warning(
+                    self,
+                    "ML Prediction Error",
+                    f"Cannot enable ML prediction:\n{str(e)}\n\n"
+                    "Please check ML model in 'ML Control' window."
+                )
+                self.chk_use_ml_prediction.blockSignals(True)
+                self.chk_use_ml_prediction.setChecked(False)
+                self.chk_use_ml_prediction.blockSignals(False)
+                return
+        
+        self._use_ml_prediction = enabled
+        logger.info(f"ML prediction: {'enabled' if enabled else 'disabled'}")
+        
+        # Update ML control form if open
+        if hasattr(self, 'ml_control_form') and self.ml_control_form:
+            try:
+                self.ml_control_form.chk_use_ml.blockSignals(True)
+                self.ml_control_form.chk_use_ml.setChecked(enabled)
+                self.ml_control_form.chk_use_ml.blockSignals(False)
+            except:
+                pass
         logger.info(f"Minimize to tray: {'enabled' if self._minimize_to_tray else 'disabled'}")
     
     def on_browse_clicked(self):
@@ -554,15 +674,27 @@ class MainWindow(QMainWindow):
             self.ml_control_form.activateWindow()
         
         self.ml_control_form.update_status()
+        
+        # Sync ML prediction checkbox state
+        if hasattr(self, 'chk_use_ml_prediction') and hasattr(self.ml_control_form, 'chk_use_ml'):
+            self.ml_control_form.chk_use_ml.blockSignals(True)
+            self.ml_control_form.chk_use_ml.setChecked(self.chk_use_ml_prediction.isChecked())
+            self.ml_control_form.chk_use_ml.blockSignals(False)
 
     def on_shm_toggled(self, state):
         """Handle shared memory toggle"""
         if state == Qt.Checked:
             try:
                 self.shared_memory.start()
+                # Enable game control checkbox when shared memory starts
+                self.chk_enable_game_control.setEnabled(True)
             except Exception as e:
                 logger.error(f"Failed to start shared memory service: {e}", exc_info=True)
+                self.chk_enable_shm.blockSignals(True)
                 self.chk_enable_shm.setChecked(False)
+                self.chk_enable_shm.blockSignals(False)
+                # Disable game control if shared memory failed to start
+                self.chk_enable_game_control.setEnabled(False)
                 QMessageBox.critical(
                     self,
                     "Shared Memory Error",
@@ -571,11 +703,15 @@ class MainWindow(QMainWindow):
                 )
         else:
             self.shared_memory.stop()
+            # Disable game control checkbox when shared memory stops
+            self.chk_enable_game_control.setEnabled(False)
     
     def on_shm_started(self, memory_name: str):
         """Handle shared memory service started"""
         self.lbl_shm_status.setText(f"Status: Running ('{memory_name}')")
         self.lbl_shm_status.setStyleSheet("color: green; font-weight: bold;")
+        # Enable game control checkbox when shared memory starts
+        self.chk_enable_game_control.setEnabled(True)
         logger.info(f"Shared memory service started: {memory_name}")
         
         # Show notification
@@ -591,6 +727,8 @@ class MainWindow(QMainWindow):
         self.lbl_shm_status.setText("Status: Stopped")
         self.lbl_shm_status.setStyleSheet("color: #888;")
         self.lbl_shm_updates.setText("Updates: 0")
+        # Disable game control checkbox when shared memory stops
+        self.chk_enable_game_control.setEnabled(False)
         logger.info("Shared memory service stopped")
     
     def on_shm_error(self, error_msg: str):
@@ -602,9 +740,100 @@ class MainWindow(QMainWindow):
             f"Shared memory error:\n{error_msg}"
         )
     
+    def on_accept_game_commands_changed(self, state):
+        """Handle accept game commands checkbox state change"""
+        if state == Qt.Checked:
+            logger.info("Accepting commands from games: ENABLED")
+        else:
+            logger.info("Accepting commands from games: DISABLED")
+    
+    def on_auto_train_changed(self, state):
+        """Handle auto-train checkbox state change"""
+        enabled = state == Qt.Checked
+        self.ml_trainer.set_auto_train_enabled(enabled)
+        if enabled:
+            logger.info("Auto-training: ENABLED")
+            self.tray_icon.show_message(
+                "Auto-Training",
+                "ML model will automatically retrain when new data is collected",
+                QSystemTrayIcon.Information
+            )
+        else:
+            logger.info("Auto-training: DISABLED")
+    
+    def on_auto_training_started(self):
+        """Handle auto-training started signal"""
+        logger.info("🤖 Auto-training started in background")
+        self.tray_icon.show_message(
+            "ML Training",
+            "Model training started in background...",
+            QSystemTrayIcon.Information
+        )
+    
+    def on_auto_training_completed(self, metrics: dict):
+        """Handle auto-training completed signal"""
+        accuracy = metrics.get('test_accuracy', 0)
+        n_samples = metrics.get('n_samples', 0)
+        
+        logger.info(f"✅ Auto-training completed: accuracy={accuracy:.3f}, samples={n_samples}")
+        
+        self.tray_icon.show_message(
+            "ML Training Complete",
+            f"Model retrained successfully!\nAccuracy: {accuracy:.1%}\nSamples: {n_samples}",
+            QSystemTrayIcon.Information
+        )
+        
+        # Update ML control form if open
+        if hasattr(self, 'ml_control_form') and self.ml_control_form:
+            try:
+                self.ml_control_form.refresh_stats()
+            except:
+                pass
+        
+        # Update ML prediction checkbox state
+        if hasattr(self, 'chk_use_ml_prediction'):
+            if self.ml_predictor.is_ready():
+                self.chk_use_ml_prediction.setEnabled(True)
+            else:
+                self.chk_use_ml_prediction.setEnabled(False)
+                if self.chk_use_ml_prediction.isChecked():
+                    self.chk_use_ml_prediction.setChecked(False)
+    
+    def on_auto_training_failed(self, error_msg: str):
+        """Handle auto-training failed signal"""
+        logger.error(f"❌ Auto-training failed: {error_msg}")
+        self.tray_icon.show_message(
+            "ML Training Failed",
+            f"Could not retrain model:\n{error_msg}",
+            QSystemTrayIcon.Warning
+        )
+    
+    def on_model_updated(self):
+        """Handle model updated signal"""
+        logger.info("🔄 ML model was updated")
+        # Reload model in predictor if needed
+        if hasattr(self, 'ml_predictor'):
+            try:
+                self.ml_predictor.load_model()
+                # Update checkbox state if model is now ready
+                if hasattr(self, 'chk_use_ml_prediction'):
+                    if self.ml_predictor.is_ready():
+                        self.chk_use_ml_prediction.setEnabled(True)
+                    else:
+                        self.chk_use_ml_prediction.setEnabled(False)
+                        if self.chk_use_ml_prediction.isChecked():
+                            self.chk_use_ml_prediction.setChecked(False)
+            except:
+                pass
+    
     def on_shm_command_received(self, command: dict):
         """Handle command received from game client via shared memory"""
         try:
+            # Check if accepting commands is enabled
+            if not self.chk_accept_game_commands.isChecked():
+                logger.debug("Game commands ignored: 'Accept commands from games' is disabled")
+                return
+            
             command_type = command.get("type", 0)
             event_name = command.get("event", "")
             
@@ -616,6 +845,10 @@ class MainWindow(QMainWindow):
             
             # Type 1: Save event to history
             if command_type == 1:
+                # Check if auto-save to history is enabled
+                if not self.chk_auto_save_history.isChecked():
+                    logger.debug(f"History save skipped: 'Auto-save to history' is disabled for event '{event_name}'")
+                    return
                 # Get current EEG data from device
                 if hasattr(self, 'device') and self.device and hasattr(self.device, 'model'):
                     model = self.device.model
@@ -651,6 +884,11 @@ class MainWindow(QMainWindow):
             
             # Type 2: Save for ML training
             elif command_type == 2:
+                # Check if auto-save for ML is enabled
+                if not self.chk_auto_save_ml.isChecked():
+                    logger.debug(f"ML training save skipped: 'Auto-save for ML training' is disabled for event '{event_name}'")
+                    return
+                
                 # Get current EEG data
                 if hasattr(self, 'device') and self.device and hasattr(self.device, 'model'):
                     model = self.device.model
@@ -673,6 +911,12 @@ class MainWindow(QMainWindow):
                     
                     self.ml_trainer.add_training_sample(training_sample)
                     logger.info(f"Added ML training sample '{event_name}' from game")
+                    
+                    # Update ML Control form if it's open
+                    if self.ml_control_form and self.ml_control_form.isVisible():
+                        self.ml_control_form.update_status()
+                    
+                    # Auto-training will be triggered automatically if enabled
                     
                     # Also save to history
                     h = EegHistoryModel(
@@ -901,16 +1145,59 @@ class MainWindow(QMainWindow):
         """Handle EEG data in main thread"""
         # Get event name (rule-based or ML-based)
         event_name = self.get_event_name()  # Default: rule-based
+        event_source = "rule-based"  # Track where event came from
         
         # Use ML prediction if enabled
-        if self._use_ml_prediction and self.ml_predictor.is_ready():
-            prediction = self.ml_predictor.predict(model)
-            if prediction and prediction.is_confident(self.ml_trainer.config.confidence_threshold):
-                event_name = prediction.predicted_event
-                logger.debug(f"ML predicted event: {event_name} (confidence: {prediction.confidence:.2f})")
-            else:
-                logger.debug("ML prediction not confident enough, using rule-based")
-                event_name = self.get_event_name()
+        if self._use_ml_prediction:
+            try:
+                if self.ml_predictor.is_ready():
+                    prediction = self.ml_predictor.predict(model)
+                    if prediction:
+                        confidence_threshold = self.ml_trainer.config.confidence_threshold
+                        is_confident = prediction.is_confident(confidence_threshold)
+                        logger.debug(f"ML prediction: event={prediction.predicted_event}, confidence={prediction.confidence:.2f}, threshold={confidence_threshold}, is_confident={is_confident}")
+                        
+                        if is_confident:
+                            predicted_event_value = prediction.predicted_event
+                            logger.debug(f"🔍 ML prediction.predicted_event='{predicted_event_value}', type={type(predicted_event_value)}")
+                            event_name = predicted_event_value
+                            event_source = "ml-prediction"  # Mark as ML prediction
+                            logger.info(f"✅ ML predicted event for game: {event_name} (confidence: {prediction.confidence:.2f}, probabilities: {prediction.probabilities})")
+                            # Verify event_name is not empty after assignment
+                            if not event_name or event_name == "":
+                                logger.error(f"❌ ERROR: event_name is empty after assignment! prediction.predicted_event='{predicted_event_value}', type={type(predicted_event_value)}")
+                        else:
+                            # ML prediction not confident - use empty event (NO rule-based fallback)
+                            logger.debug(f"ML prediction not confident: {prediction.confidence:.2f} < {confidence_threshold}, using empty event (rule-based disabled)")
+                            event_name = ""  # Empty event instead of rule-based
+                            event_source = "ml-prediction-failed"
+                    else:
+                        # ML prediction returned None
+                        logger.debug("ML prediction returned None, using empty event (rule-based disabled)")
+                        event_name = ""  # Empty event instead of rule-based
+                        event_source = "ml-prediction-failed"
+                else:
+                    # Model not ready - use empty event (NO rule-based fallback)
+                    logger.debug("ML model not ready, using empty event (rule-based disabled)")
+                    event_name = ""
+                    event_source = "ml-not-ready"
+            except Exception as e:
+                # Catch any unexpected errors - use empty event (NO rule-based fallback)
+                logger.error(f"Error in ML prediction, using empty event (rule-based disabled): {e}", exc_info=True)
+                event_name = ""
+                event_source = "ml-error"
+        else:
+            # ML prediction disabled - use rule-based (only if ML is explicitly disabled)
+            event_name = self.get_event_name()
+            event_source = "rule-based"
+            logger.debug(f"ML prediction disabled, using rule-based. event_name={event_name}")
+        
+        # Log event_name after all ML/rule-based logic (for debugging)
+        if not hasattr(self, '_event_name_log_counter'):
+            self._event_name_log_counter = 0
+        self._event_name_log_counter += 1
+        if self._event_name_log_counter % 100 == 0:  # Log every 100 updates
+            logger.info(f"🔍 After ML/rule logic: event_name='{event_name}', event_source='{event_source}', type(event_name)={type(event_name)}")
         
         # Create history record
         h = EegHistoryModel(
@@ -928,11 +1215,34 @@ class MainWindow(QMainWindow):
         )
         
         # Process mouse control
-        if self.cb_autouse.isChecked() and h.event_name:
-            self.mouse_service.play(h, self.config, h.event_name, self.cb_use_key.isChecked())
+        # Only process if we have a valid event name
+        # IMPORTANT: Don't overwrite event_name if it was set by ML prediction!
+        if self.cb_autouse.isChecked():
+            # Use event from current selection or ML prediction
+            if h.event_name and h.event_name != EventType.STOP.value:
+                self.mouse_service.play(h, self.config, h.event_name, self.cb_use_key.isChecked())
+            else:
+                # No valid event - stop movement
+                self.mouse_service.stop()
         else:
-            event_name = self.history_service.get_event_name_by(h, self.config)
-            self.mouse_service.play(h, self.config, event_name, self.cb_use_key.isChecked())
+            # Use history-based detection ONLY if ML didn't set event_name
+            # If ML is enabled and set event_name, don't overwrite it with rule-based!
+            if self._use_ml_prediction and event_source.startswith("ml-") and event_name:
+                # ML already set event_name - use it, don't overwrite with rule-based
+                if event_name and event_name != EventType.STOP.value:
+                    self.mouse_service.play(h, self.config, event_name, self.cb_use_key.isChecked())
+                else:
+                    self.mouse_service.stop()
+            else:
+                # ML not enabled or didn't set event - use history-based detection
+                history_event_name = self.history_service.get_event_name_by(h, self.config)
+                # Only play if event_name is not empty and not stop
+                if history_event_name and history_event_name != EventType.STOP.value:
+                    self.mouse_service.play(h, self.config, history_event_name, self.cb_use_key.isChecked())
+                else:
+                    # No event detected - stop movement
+                    self.mouse_service.stop()
+                # Note: Don't overwrite event_name here - keep ML prediction if it was set
         
         # Update EEG data form if open
         if self.eeg_data_form and self.eeg_data_form.isVisible():
@@ -943,7 +1253,13 @@ class MainWindow(QMainWindow):
             self.history_service.add(h)
         
         # Collect training data if in training mode
-        if hasattr(self, '_is_collecting_training_data') and self._is_collecting_training_data and event_name:
+        # IMPORTANT: Only collect data from rule-based or manual selection, NOT from ML predictions
+        # This prevents feedback loop where ML predictions train the model
+        if (hasattr(self, '_is_collecting_training_data') and 
+            self._is_collecting_training_data and 
+            event_name and 
+            event_source != "ml-prediction"):  # Don't collect ML predictions!
+            
             from models.ml_models import MLTrainingData
             training_sample = MLTrainingData(
                 attention=model.attention,
@@ -959,15 +1275,70 @@ class MainWindow(QMainWindow):
                 event=event_name
             )
             self.ml_trainer.add_training_sample(training_sample)
-            logger.debug(f"Added training sample for event: {event_name}")
+            logger.debug(f"Added training sample for event: {event_name} (source: {event_source})")
             self.update_counter()
+            
+            # Update ML Control form if it's open
+            if self.ml_control_form and self.ml_control_form.isVisible():
+                self.ml_control_form.update_status()
+        elif event_source == "ml-prediction" and hasattr(self, '_is_collecting_training_data') and self._is_collecting_training_data:
+            # Log that we're skipping ML predictions
+            logger.debug(f"Skipping training sample collection for ML-predicted event: {event_name} (to prevent feedback loop)")
         
-        # Update shared memory if enabled
-        if self.shared_memory.is_running:
+        # Update shared memory if enabled and game control is enabled
+        # IMPORTANT: Use the event_name determined above (which may be from ML prediction)
+        if not hasattr(self, '_shm_status_logged'):
+            self._shm_status_logged = False
+        if not self._shm_status_logged:
+            logger.info(f"📤 Shared memory status: is_running={self.shared_memory.is_running}, game_control={self.chk_enable_game_control.isChecked() if hasattr(self, 'chk_enable_game_control') else 'N/A'}")
+            self._shm_status_logged = True
+        
+        if self.shared_memory.is_running and self.chk_enable_game_control.isChecked():
+            # Use event_name from ML prediction or rule-based (already determined above)
+            # BUT: If ML is enabled, ONLY send ML predictions - block ALL rule-based events!
+            if self._use_ml_prediction:
+                if event_source == "rule-based":
+                    # ML is enabled but we got rule-based event - BLOCK IT!
+                    game_event = ""  # Empty event instead of rule-based
+                    if not hasattr(self, '_rule_based_blocked_logged'):
+                        logger.warning(f"🚫 BLOCKED rule-based event '{event_name}' - ML prediction is enabled, only ML events allowed!")
+                        self._rule_based_blocked_logged = True
+                elif event_source.startswith("ml-"):
+                    # ML event - allow it (even if it's empty from failed prediction)
+                    game_event = event_name
+                    # Log if event is empty but source is ml-prediction (should be ml-prediction-failed)
+                    if not game_event and event_source == "ml-prediction":
+                        logger.warning(f"⚠️ WARNING: event_name is empty but event_source is 'ml-prediction'! This should be 'ml-prediction-failed'")
+                else:
+                    # Unknown source - block it if ML is enabled
+                    game_event = ""
+                    logger.debug(f"🚫 Blocked event from unknown source '{event_source}' (ML enabled)")
+            else:
+                # ML disabled - allow rule-based
+                game_event = event_name
+            
+            # Log before filtering to see what we have
+            if not hasattr(self, '_pre_filter_log_counter'):
+                self._pre_filter_log_counter = 0
+            self._pre_filter_log_counter += 1
+            if self._pre_filter_log_counter % 100 == 0:  # Log every 100 updates
+                logger.info(f"🔍 Before shared memory: event_name='{event_name}', event_source='{event_source}', game_event='{game_event}'")
+            
+            # Log every event being sent to shared memory (for debugging)
+            if game_event and game_event != "":
+                if not hasattr(self, '_last_shm_event_logged'):
+                    self._last_shm_event_logged = ""
+                if game_event != self._last_shm_event_logged:
+                    logger.info(f"📤 Sending event to game via shared memory: '{game_event}' (source: {event_source})")
+                    self._last_shm_event_logged = game_event
+            elif not hasattr(self, '_empty_event_logged'):
+                logger.debug(f"📤 Shared memory: event_name is empty, not sending event")
+                self._empty_event_logged = True
+            
             eeg_data = {
                 "attention": model.attention,
                 "meditation": model.meditation,
-                "signal": model.signal,
+                "signal": getattr(model, 'signal', 0),  # Signal quality (0 if not available)
                 "delta": model.delta,
                 "theta": model.theta,
                 "low_alpha": model.low_alpha,
@@ -976,13 +1347,49 @@ class MainWindow(QMainWindow):
                 "high_beta": model.high_beta,
                 "low_gamma": model.low_gamma,
                 "high_gamma": model.high_gamma,
-                "event": event_name
+                "event": game_event  # Use event determined above (ML or rule-based)
             }
+            # Always call update_eeg_data, even if event hasn't changed (to ensure it persists in shared memory)
+            # Log before sending to shared memory (only for non-empty events, and only when it changes)
+            if game_event and game_event != "":
+                if not hasattr(self, '_last_eeg_update_logged'):
+                    self._last_eeg_update_logged = ""
+                if game_event != self._last_eeg_update_logged:
+                    logger.debug(f"📤 Calling update_eeg_data with event: '{game_event}'")
+                    self._last_eeg_update_logged = game_event
+            # IMPORTANT: Always call update_eeg_data to ensure events persist in shared memory
+            # Log before calling update_eeg_data to verify what we're sending
+            if not hasattr(self, '_update_eeg_data_log_counter'):
+                self._update_eeg_data_log_counter = 0
+            self._update_eeg_data_log_counter += 1
+            if self._update_eeg_data_log_counter % 100 == 0:  # Log every 100 calls
+                logger.info(f"📤 Calling update_eeg_data: event='{game_event}', source={event_source}, ml_enabled={self._use_ml_prediction}")
             self.shared_memory.update_eeg_data(eeg_data)
             
-            # Update UI counter
+            # Log for debugging (only log occasionally to avoid spam)
+            if hasattr(self, '_shm_log_counter'):
+                self._shm_log_counter += 1
+            else:
+                self._shm_log_counter = 0
+            
+            if self._shm_log_counter % 100 == 0:  # Log every 100 updates
+                logger.info(f"🎮 Shared memory update: event={game_event}, source={event_source}, ml_enabled={self._use_ml_prediction}, ml_ready={self.ml_predictor.is_ready() if hasattr(self, 'ml_predictor') else False}")
+            
+            # Update UI counter and event source indicator
             stats = self.shared_memory.get_stats()
             self.lbl_shm_updates.setText(f"Updates: {stats['updates_sent']}")
+            
+            # Update event source indicator
+            if game_event:
+                source_text = "ML" if event_source == "ml-prediction" else "Rule"
+                self.lbl_shm_event_source.setText(f"Event: {game_event} ({source_text})")
+                if event_source == "ml-prediction":
+                    self.lbl_shm_event_source.setStyleSheet("color: #4CAF50; font-size: 9pt; font-weight: bold;")
+                else:
+                    self.lbl_shm_event_source.setStyleSheet("color: #888; font-size: 9pt;")
+            else:
+                self.lbl_shm_event_source.setText("Event: -")
+                self.lbl_shm_event_source.setStyleSheet("color: #888; font-size: 9pt;")
 
     def on_extend_data_event(self, model: BrainLinkExtendModel):
         """Handle extended data event (called from device)"""
@@ -1004,8 +1411,8 @@ class MainWindow(QMainWindow):
         self.lbl_temp.setText(str(model.temperature))
         self.lbl_heart.setText(str(model.heart_rate))
         
-        # Update shared memory if enabled
-        if self.shared_memory.is_running:
+        # Update shared memory if enabled and game control is enabled
+        if self.shared_memory.is_running and self.chk_enable_game_control.isChecked():
             self.shared_memory.update_extended_data(
                 ap=model.ap,
                 electric=model.electric,
@@ -1021,8 +1428,8 @@ class MainWindow(QMainWindow):
         else:
             logger.debug("Gyro form not open - data not displayed")
         
-        # Update shared memory if enabled
-        if self.shared_memory.is_running:
+        # Update shared memory if enabled and game control is enabled
+        if self.shared_memory.is_running and self.chk_enable_game_control.isChecked():
             self.shared_memory.update_gyro_data(x, y, z)
 
     def closeEvent(self, event):
@@ -1088,6 +1495,34 @@ class MainWindow(QMainWindow):
                 except Exception as e:
                     logger.error(f"Error stopping simulator: {e}")
             
+            # Stop ML training process if running
+            if self.ml_trainer:
+                logger.info("Cleaning up ML trainer service")
+                try:
+                    if hasattr(self.ml_trainer, 'cleanup'):
+                        self.ml_trainer.cleanup()
+                    elif self.ml_trainer.is_training():
+                        self.ml_trainer._cleanup_process()
+                except Exception as e:
+                    logger.error(f"Error cleaning up ML trainer: {e}")
+            
+            # Stop shared memory service
+            if self.shared_memory and self.shared_memory.is_running:
+                logger.info("Stopping shared memory service")
+                try:
+                    self.shared_memory.stop()
+                except Exception as e:
+                    logger.error(f"Error stopping shared memory service: {e}")
+            
+            # Stop device manager scan if running
+            if self.device_manager:
+                logger.info("Stopping device manager")
+                try:
+                    if hasattr(self.device_manager, 'stop_scan'):
+                        self.device_manager.stop_scan()
+                except Exception as e:
+                    logger.error(f"Error stopping device manager: {e}")
+            
             # Close child windows
             logger.debug("Closing child windows")
             for window_name, window in [
@@ -1108,6 +1543,28 @@ class MainWindow(QMainWindow):
                 self.tray_icon.cleanup()
             except Exception as e:
                 logger.error(f"Error cleaning up tray icon: {e}")
+            
+            # Final cleanup: ensure all multiprocessing processes are terminated
+            import multiprocessing
+            try:
+                # Get all active child processes
+                active_processes = multiprocessing.active_children()
+                if active_processes:
+                    logger.info(f"Terminating {len(active_processes)} active child processes")
+                    for process in active_processes:
+                        try:
+                            if process.is_alive():
+                                logger.info(f"Terminating process: {process.name} (PID: {process.pid})")
+                                process.terminate()
+                                process.join(timeout=1.0)
+                                if process.is_alive():
+                                    logger.warning(f"Force killing process: {process.name}")
+                                    process.kill()
+                                    process.join(timeout=0.5)
+                        except Exception as e:
+                            logger.error(f"Error terminating process {process.name}: {e}")
+            except Exception as e:
+                logger.error(f"Error cleaning up multiprocessing: {e}")
             
             logger.info("All resources cleaned up successfully")
             

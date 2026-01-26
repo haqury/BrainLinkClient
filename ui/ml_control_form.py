@@ -1,11 +1,14 @@
 """ML Control Form for training and managing ML models"""
 
 import logging
+import pickle
+import numpy as np
+from pathlib import Path
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QGroupBox, QTextEdit, QCheckBox, QMessageBox, QProgressBar
+    QGroupBox, QTextEdit, QCheckBox, QMessageBox, QProgressBar, QFileDialog
 )
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QTimer
 
 from services.ml_trainer_service import MLTrainerService
 from services.ml_predictor_service import MLPredictorService
@@ -34,6 +37,11 @@ class MLControlForm(QDialog):
         self.setWindowFlags(Qt.Window | Qt.WindowCloseButtonHint | Qt.WindowMinimizeButtonHint)
         self.setModal(False)
         
+        # Timer for auto-updating statistics
+        self.update_timer = QTimer()
+        self.update_timer.timeout.connect(self.update_status)
+        self.update_timer.setInterval(1000)  # Update every second
+        
         self.init_ui()
         self.update_status()
     
@@ -58,6 +66,10 @@ class MLControlForm(QDialog):
         self.lbl_training_data = QLabel("Training samples: 0")
         self.lbl_training_data.setStyleSheet("font-size: 11pt;")
         status_layout.addWidget(self.lbl_training_data)
+        
+        self.lbl_model_trained_on = QLabel("Model trained on: -")
+        self.lbl_model_trained_on.setStyleSheet("font-size: 10pt; color: #888;")
+        status_layout.addWidget(self.lbl_model_trained_on)
         
         status_group.setLayout(status_layout)
         layout.addWidget(status_group)
@@ -118,6 +130,20 @@ class MLControlForm(QDialog):
         self.progress_bar.setVisible(False)
         training_layout.addWidget(self.progress_bar)
         
+        # Model save/load buttons
+        model_buttons = QHBoxLayout()
+        self.btn_save_model = QPushButton("💾 Save Model")
+        self.btn_save_model.clicked.connect(self.on_save_model_clicked)
+        self.btn_save_model.setToolTip("Save trained model to file")
+        model_buttons.addWidget(self.btn_save_model)
+        
+        self.btn_load_model = QPushButton("📂 Load Model")
+        self.btn_load_model.clicked.connect(self.on_load_model_clicked)
+        self.btn_load_model.setToolTip("Load model from file")
+        model_buttons.addWidget(self.btn_load_model)
+        
+        training_layout.addLayout(model_buttons)
+        
         training_group.setLayout(training_layout)
         layout.addWidget(training_group)
         
@@ -130,6 +156,13 @@ class MLControlForm(QDialog):
         self.chk_use_ml.setToolTip("Use ML model instead of rule-based detection")
         self.chk_use_ml.stateChanged.connect(self.on_use_ml_changed)
         prediction_layout.addWidget(self.chk_use_ml)
+        
+        self.chk_invert_ml_mr = QCheckBox("Invert ML/MR (fix if ml works as right)")
+        self.chk_invert_ml_mr.setStyleSheet("font-size: 10pt;")
+        self.chk_invert_ml_mr.setToolTip("If ML predicts 'ml' but it moves right, enable this to swap ml/mr")
+        self.chk_invert_ml_mr.setChecked(self.ml_trainer.config.invert_ml_mr)
+        self.chk_invert_ml_mr.stateChanged.connect(self.on_invert_ml_mr_changed)
+        prediction_layout.addWidget(self.chk_invert_ml_mr)
         
         prediction_group.setLayout(prediction_layout)
         layout.addWidget(prediction_group)
@@ -147,6 +180,10 @@ class MLControlForm(QDialog):
         layout.addWidget(results_group)
         
         self.setLayout(layout)
+        
+        # Start auto-update timer when window is shown
+        self.update_timer.start()
+        
         logger.info("ML Control Form initialized")
     
     def update_status(self):
@@ -155,11 +192,16 @@ class MLControlForm(QDialog):
             self.lbl_model_status.setText("Model: ✓ Trained and ready")
             self.lbl_model_status.setStyleSheet("color: green; font-size: 11pt; font-weight: bold;")
             self.chk_use_ml.setEnabled(True)
+            self.btn_save_model.setEnabled(True)
+            # Sync with main window checkbox if exists
+            if hasattr(self.parent_window, 'chk_use_ml_prediction'):
+                self.chk_use_ml.setChecked(self.parent_window.chk_use_ml_prediction.isChecked())
         else:
             self.lbl_model_status.setText("Model: ✗ Not trained")
             self.lbl_model_status.setStyleSheet("color: red; font-size: 11pt;")
             self.chk_use_ml.setEnabled(False)
             self.chk_use_ml.setChecked(False)
+            self.btn_save_model.setEnabled(False)
         
         stats = self.ml_trainer.get_training_stats()
         total = sum(stats.values())
@@ -171,6 +213,19 @@ class MLControlForm(QDialog):
             self.lbl_training_data.setText(f"Training samples: {total}")
         
         self.lbl_training_data.setStyleSheet("font-size: 11pt;")
+        
+        # Show last training metrics if available
+        if hasattr(self.ml_trainer, 'last_training_metrics') and self.ml_trainer.last_training_metrics:
+            metrics = self.ml_trainer.last_training_metrics
+            n_samples = metrics.get('n_samples', 0)
+            test_accuracy = metrics.get('test_accuracy', 0)
+            self.lbl_model_trained_on.setText(
+                f"Model trained on: {n_samples} samples (accuracy: {test_accuracy:.1%})"
+            )
+            self.lbl_model_trained_on.setStyleSheet("font-size: 10pt; color: #4CAF50;")
+        else:
+            self.lbl_model_trained_on.setText("Model trained on: -")
+            self.lbl_model_trained_on.setStyleSheet("font-size: 10pt; color: #888;")
     
     def on_collect_changed(self, state):
         """Handle collect training data checkbox"""
@@ -299,11 +354,35 @@ class MLControlForm(QDialog):
         self.progress_bar.setRange(0, 0)  # Indeterminate
         self.btn_train.setEnabled(False)
         
+        # Connect to training signals for manual training
+        if not hasattr(self, '_training_connected'):
+            self.ml_trainer.auto_training_completed.connect(self._on_manual_training_completed)
+            self.ml_trainer.auto_training_failed.connect(self._on_manual_training_failed)
+            self._training_connected = True
+        
+        # Start training in process (non-blocking)
         try:
-            # Train model
-            logger.info("Starting model training...")
-            metrics = self.ml_trainer.train_model()
-            
+            logger.info("Starting model training in separate process...")
+            # This will start process and return None (async)
+            self.ml_trainer.train_model(use_process=True)
+            # Results will come via signals
+        except Exception as e:
+            logger.error(f"Error starting training: {e}", exc_info=True)
+            QMessageBox.critical(
+                self,
+                "Training Failed",
+                f"Failed to start training:\n{e}"
+            )
+            self.progress_bar.setVisible(False)
+            self.btn_train.setEnabled(True)
+    
+    def _on_manual_training_completed(self, metrics: dict):
+        """Handle manual training completion"""
+        # Check if this is from manual training (progress bar visible)
+        if not self.progress_bar.isVisible():
+            return  # This is from auto-training, ignore
+        
+        try:
             # Show results
             results_text = f"Training completed successfully!\n\n"
             results_text += f"Training accuracy: {metrics['train_accuracy']:.3f}\n"
@@ -324,21 +403,234 @@ class MLControlForm(QDialog):
                 f"Model trained successfully!\n\n"
                 f"Test accuracy: {metrics['test_accuracy']:.1%}"
             )
-        
-        except Exception as e:
-            logger.error(f"Error training model: {e}", exc_info=True)
-            QMessageBox.critical(
-                self,
-                "Training Failed",
-                f"Failed to train model:\n{e}"
-            )
-        
         finally:
             self.progress_bar.setVisible(False)
             self.btn_train.setEnabled(True)
     
+    def _on_manual_training_failed(self, error_msg: str):
+        """Handle manual training failure"""
+        # Check if this is from manual training (progress bar visible)
+        if not self.progress_bar.isVisible():
+            return  # This is from auto-training, ignore
+        
+        QMessageBox.critical(
+            self,
+            "Training Failed",
+            f"Failed to train model:\n{error_msg}"
+        )
+        
+        self.progress_bar.setVisible(False)
+        self.btn_train.setEnabled(True)
+    
     def on_use_ml_changed(self, state):
         """Handle use ML prediction checkbox"""
         if self.parent_window:
-            self.parent_window._use_ml_prediction = (state == Qt.Checked)
-            logger.info(f"ML prediction: {'enabled' if state == Qt.Checked else 'disabled'}")
+            enabled = (state == Qt.Checked)
+            
+            if enabled:
+                # Verify model is ready before enabling
+                if not self.ml_predictor.is_ready():
+                    QMessageBox.warning(
+                        self,
+                        "Model Not Ready",
+                        "Cannot enable ML prediction:\n"
+                        "Model is not trained or not loaded.\n\n"
+                        "Please train the model first."
+                    )
+                    # Uncheck the checkbox
+                    self.chk_use_ml.blockSignals(True)
+                    self.chk_use_ml.setChecked(False)
+                    self.chk_use_ml.blockSignals(False)
+                    return
+                
+                # Test prediction with dummy data to ensure it works
+                try:
+                    from pybrainlink import BrainLinkModel
+                    test_model = BrainLinkModel(
+                        attention=50, meditation=50, signal=0,
+                        delta=100000, theta=80000, low_alpha=40000,
+                        high_alpha=30000, low_beta=20000, high_beta=15000,
+                        low_gamma=10000, high_gamma=8000
+                    )
+                    test_prediction = self.ml_predictor.predict(test_model)
+                    if test_prediction is None:
+                        raise ValueError("Test prediction returned None")
+                    logger.info("ML prediction test successful")
+                except Exception as e:
+                    logger.error(f"ML prediction test failed: {e}", exc_info=True)
+                    QMessageBox.warning(
+                        self,
+                        "Model Error",
+                        f"Cannot enable ML prediction:\n"
+                        f"Model test failed: {e}\n\n"
+                        f"Please retrain the model."
+                    )
+                    # Uncheck the checkbox
+                    self.chk_use_ml.blockSignals(True)
+                    self.chk_use_ml.setChecked(False)
+                    self.chk_use_ml.blockSignals(False)
+                    return
+            
+            self.parent_window._use_ml_prediction = enabled
+            logger.info(f"ML prediction: {'enabled' if enabled else 'disabled'}")
+            
+            # Update main window checkbox if exists
+            if hasattr(self.parent_window, 'chk_use_ml_prediction'):
+                self.parent_window.chk_use_ml_prediction.blockSignals(True)
+                self.parent_window.chk_use_ml_prediction.setChecked(enabled)
+                self.parent_window.chk_use_ml_prediction.blockSignals(False)
+    
+    def on_invert_ml_mr_changed(self, state):
+        """Handle invert ml/mr checkbox"""
+        enabled = (state == Qt.Checked)
+        self.ml_trainer.config.invert_ml_mr = enabled
+        self.ml_predictor.config.invert_ml_mr = enabled
+        logger.info(f"ML/MR inversion: {'enabled' if enabled else 'disabled'}")
+    
+    def showEvent(self, event):
+        """Handle window show event - start auto-update timer"""
+        super().showEvent(event)
+        self.update_timer.start()
+        self.update_status()  # Update immediately when shown
+    
+    def hideEvent(self, event):
+        """Handle window hide event - stop auto-update timer"""
+        super().hideEvent(event)
+        self.update_timer.stop()
+    
+    def refresh_stats(self):
+        """Refresh statistics display (called after training)"""
+        self.update_status()
+    
+    def on_save_model_clicked(self):
+        """Save trained model to file"""
+        if not self.ml_trainer.is_trained or self.ml_trainer.model is None:
+            QMessageBox.warning(
+                self,
+                "No Model",
+                "No trained model to save.\n\n"
+                "Please train a model first."
+            )
+            return
+        
+        # Get save path from user
+        default_path = self.ml_trainer.config.model_path
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save ML Model",
+            default_path,
+            "Pickle Files (*.pkl);;All Files (*)"
+        )
+        
+        if not file_path:
+            return  # User cancelled
+        
+        try:
+            # Save model to selected path
+            path = Path(file_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            
+            with open(path, 'wb') as f:
+                pickle.dump(self.ml_trainer.model, f)
+            
+            # Also update config path if user wants
+            reply = QMessageBox.question(
+                self,
+                "Save Successful",
+                f"Model saved successfully to:\n{file_path}\n\n"
+                f"Use this as default model path?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes
+            )
+            
+            if reply == QMessageBox.Yes:
+                self.ml_trainer.config.model_path = file_path
+                logger.info(f"Updated default model path to: {file_path}")
+            
+            logger.info(f"Model saved to {file_path}")
+            
+        except Exception as e:
+            logger.error(f"Error saving model: {e}", exc_info=True)
+            QMessageBox.critical(
+                self,
+                "Save Failed",
+                f"Failed to save model:\n{e}"
+            )
+    
+    def on_load_model_clicked(self):
+        """Load trained model from file"""
+        # Get load path from user
+        default_path = self.ml_trainer.config.model_path
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load ML Model",
+            str(Path(default_path).parent) if default_path else "",
+            "Pickle Files (*.pkl);;All Files (*)"
+        )
+        
+        if not file_path:
+            return  # User cancelled
+        
+        try:
+            # Load model from selected path
+            path = Path(file_path)
+            if not path.exists():
+                QMessageBox.warning(
+                    self,
+                    "File Not Found",
+                    f"File not found:\n{file_path}"
+                )
+                return
+            
+            with open(path, 'rb') as f:
+                model = pickle.load(f)
+            
+            # Validate loaded model
+            if model is None:
+                raise ValueError("Loaded model is None")
+            
+            if not hasattr(model, 'predict'):
+                raise ValueError("Loaded model does not have predict method")
+            
+            # Test model with dummy data
+            dummy_features = [50.0] * 10
+            X_test = np.array([dummy_features])
+            _ = model.predict(X_test)
+            
+            # Set model
+            self.ml_trainer.model = model
+            self.ml_trainer.is_trained = True
+            
+            # Update config path if user wants
+            reply = QMessageBox.question(
+                self,
+                "Load Successful",
+                f"Model loaded successfully from:\n{file_path}\n\n"
+                f"Model validated and ready to use.\n\n"
+                f"Use this as default model path?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes
+            )
+            
+            if reply == QMessageBox.No:
+                # Still update path for convenience
+                self.ml_trainer.config.model_path = file_path
+            else:
+                self.ml_trainer.config.model_path = file_path
+            
+            # Reload predictor to use new model
+            self.ml_predictor.trainer = self.ml_trainer
+            
+            # Update UI
+            self.update_status()
+            
+            logger.info(f"Model loaded from {file_path}")
+            
+        except Exception as e:
+            logger.error(f"Error loading model: {e}", exc_info=True)
+            QMessageBox.critical(
+                self,
+                "Load Failed",
+                f"Failed to load model:\n{e}\n\n"
+                f"Make sure the file is a valid trained model."
+            )
