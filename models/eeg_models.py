@@ -154,19 +154,20 @@ class EegHistoryModel:
         Returns:
             EegHistoryModel instance
         """
+        # Support both new (snake_case) and legacy (CamelCase) keys
         return cls(
-            attention=data.get('attention', 0),
-            meditation=data.get('meditation', 0),
-            signal=data.get('signal', 0),
-            delta=data.get('delta', 0),
-            theta=data.get('theta', 0),
-            low_alpha=data.get('low_alpha', 0),
-            high_alpha=data.get('high_alpha', 0),
-            low_beta=data.get('low_beta', 0),
-            high_beta=data.get('high_beta', 0),
-            low_gamma=data.get('low_gamma', 0),
-            high_gamma=data.get('high_gamma', 0),
-            event_name=data.get('event_name', '')
+            attention=data.get('attention', data.get('Attention', 0)),
+            meditation=data.get('meditation', data.get('Meditation', 0)),
+            signal=data.get('signal', data.get('Signal', 0)),
+            delta=data.get('delta', data.get('Delta', 0)),
+            theta=data.get('theta', data.get('Theta', 0)),
+            low_alpha=data.get('low_alpha', data.get('LowAlpha', 0)),
+            high_alpha=data.get('high_alpha', data.get('HighAlpha', 0)),
+            low_beta=data.get('low_beta', data.get('LowBeta', 0)),
+            high_beta=data.get('high_beta', data.get('HighBeta', 0)),
+            low_gamma=data.get('low_gamma', data.get('LowGamma', 0)),
+            high_gamma=data.get('high_gamma', data.get('HighGamma', 0)),
+            event_name=data.get('event_name', data.get('EventName', ''))
         )
 
 

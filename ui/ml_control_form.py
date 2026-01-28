@@ -6,12 +6,13 @@ import numpy as np
 from pathlib import Path
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QGroupBox, QTextEdit, QCheckBox, QMessageBox, QProgressBar, QFileDialog
+    QGroupBox, QTextEdit, QCheckBox, QMessageBox, QProgressBar, QFileDialog, QSlider
 )
 from PyQt5.QtCore import Qt, QTimer
 
 from services.ml_trainer_service import MLTrainerService
 from services.ml_predictor_service import MLPredictorService
+from models.event_types import EventType
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +84,10 @@ class MLControlForm(QDialog):
         self.chk_collect.stateChanged.connect(self.on_collect_changed)
         collection_layout.addWidget(self.chk_collect)
         
+        # Restore persisted state from parent window (so it survives close/open)
+        if self.parent_window and hasattr(self.parent_window, "_is_collecting_training_data"):
+            self.chk_collect.setChecked(bool(self.parent_window._is_collecting_training_data))
+        
         info_label = QLabel(
             "Enable this to collect EEG data with events.\n"
             "Select events in main window using checkboxes."
@@ -90,27 +95,20 @@ class MLControlForm(QDialog):
         info_label.setWordWrap(True)
         collection_layout.addWidget(info_label)
         
-        # Buttons row 1
+        # Buttons row 1 (only statistics are relevant now)
         btn_row1 = QHBoxLayout()
         self.btn_show_stats = QPushButton("Show Statistics")
         self.btn_show_stats.clicked.connect(self.on_show_stats)
         btn_row1.addWidget(self.btn_show_stats)
-        
-        self.btn_save_data = QPushButton("Save Data")
-        self.btn_save_data.clicked.connect(self.on_save_data)
-        btn_row1.addWidget(self.btn_save_data)
+        btn_row1.addStretch()
         collection_layout.addLayout(btn_row1)
         
-        # Buttons row 2
+        # Buttons row 2 (only 'Clear All Data' is still useful)
         btn_row2 = QHBoxLayout()
-        self.btn_import_history = QPushButton("Import from History")
-        self.btn_import_history.clicked.connect(self.on_import_history)
-        self.btn_import_history.setToolTip("Import training data from current history")
-        btn_row2.addWidget(self.btn_import_history)
-        
         self.btn_clear_data = QPushButton("Clear All Data")
         self.btn_clear_data.clicked.connect(self.on_clear_data)
         btn_row2.addWidget(self.btn_clear_data)
+        btn_row2.addStretch()
         collection_layout.addLayout(btn_row2)
         
         collection_group.setLayout(collection_layout)
@@ -163,6 +161,25 @@ class MLControlForm(QDialog):
         self.chk_invert_ml_mr.setChecked(self.ml_trainer.config.invert_ml_mr)
         self.chk_invert_ml_mr.stateChanged.connect(self.on_invert_ml_mr_changed)
         prediction_layout.addWidget(self.chk_invert_ml_mr)
+
+        # Feature weights (simple sliders)
+        weights_group = QGroupBox("Feature weights (lower = less influence)")
+        weights_layout = QVBoxLayout()
+
+        self._weight_value_labels = {}
+        self._weight_sliders = {}
+
+        # Only expose the two most sensitive parameters by default
+        self._add_weight_slider(weights_layout, "attention", "Attention")
+        self._add_weight_slider(weights_layout, "meditation", "Meditation")
+
+        note = QLabel("Note: changing weights affects prediction immediately, but retrain is recommended.")
+        note.setStyleSheet("font-size: 9pt; color: #888;")
+        note.setWordWrap(True)
+        weights_layout.addWidget(note)
+
+        weights_group.setLayout(weights_layout)
+        prediction_layout.addWidget(weights_group)
         
         prediction_group.setLayout(prediction_layout)
         layout.addWidget(prediction_group)
@@ -188,6 +205,14 @@ class MLControlForm(QDialog):
     
     def update_status(self):
         """Update status labels"""
+        # Keep "Enable Data Collection" synced with main window state
+        if self.parent_window and hasattr(self.parent_window, "_is_collecting_training_data"):
+            desired = bool(self.parent_window._is_collecting_training_data)
+            if self.chk_collect.isChecked() != desired:
+                self.chk_collect.blockSignals(True)
+                self.chk_collect.setChecked(desired)
+                self.chk_collect.blockSignals(False)
+
         if self.ml_predictor.is_ready():
             self.lbl_model_status.setText("Model: ✓ Trained and ready")
             self.lbl_model_status.setStyleSheet("color: green; font-size: 11pt; font-weight: bold;")
@@ -203,14 +228,55 @@ class MLControlForm(QDialog):
             self.chk_use_ml.setChecked(False)
             self.btn_save_model.setEnabled(False)
         
-        stats = self.ml_trainer.get_training_stats()
-        total = sum(stats.values())
-        
-        if stats:
-            details = ", ".join([f"{event}: {count}" for event, count in sorted(stats.items())])
-            self.lbl_training_data.setText(f"Training samples: {total} ({details})")
+        # Show data stored in the trained model (if model is trained)
+        if self.ml_trainer.is_trained and self.ml_trainer.model:
+            # Model is trained - show data from the model
+            if hasattr(self.ml_trainer, 'last_training_metrics') and self.ml_trainer.last_training_metrics:
+                # We have metrics with training data info
+                metrics = self.ml_trainer.last_training_metrics
+                n_samples = metrics.get('n_samples', 0)
+                
+                # Get event distribution from metrics (if available)
+                event_distribution = metrics.get('event_distribution', {})
+                
+                if event_distribution:
+                    # Build full distribution over all known events (including zero-count)
+                    full_distribution = {
+                        event_type.value: event_distribution.get(event_type.value, 0)
+                        for event_type in EventType
+                    }
+                    details = ", ".join(
+                        [f"{event}: {count}" for event, count in sorted(full_distribution.items())]
+                    )
+                    self.lbl_training_data.setText(f"Model data: {n_samples} samples ({details})")
+                else:
+                    # Fallback to model classes if no distribution
+                    if hasattr(self.ml_trainer.model, 'classes_'):
+                        model_classes = list(self.ml_trainer.model.classes_)
+                        classes_str = ", ".join(sorted(model_classes))
+                        self.lbl_training_data.setText(
+                            f"Model data: {n_samples} samples (classes: {classes_str})"
+                        )
+                    else:
+                        self.lbl_training_data.setText(f"Model data: {n_samples} samples")
+            else:
+                # Model loaded but no metrics - show classes from model
+                if hasattr(self.ml_trainer.model, 'classes_'):
+                    model_classes = list(self.ml_trainer.model.classes_)
+                    classes_str = ", ".join(sorted(model_classes))
+                    self.lbl_training_data.setText(f"Model data: classes ({classes_str})")
+                else:
+                    self.lbl_training_data.setText("Model data: loaded (no details)")
         else:
-            self.lbl_training_data.setText(f"Training samples: {total}")
+            # Model not trained - show current training data
+            stats = self.ml_trainer.get_training_stats()
+            total = sum(stats.values())
+            
+            if stats:
+                details = ", ".join([f"{event}: {count}" for event, count in sorted(stats.items())])
+                self.lbl_training_data.setText(f"Training samples: {total} ({details})")
+            else:
+                self.lbl_training_data.setText(f"Training samples: {total}")
         
         self.lbl_training_data.setStyleSheet("font-size: 11pt;")
         
@@ -246,25 +312,17 @@ class MLControlForm(QDialog):
         QMessageBox.information(self, "Training Data Statistics", msg)
     
     def on_save_data(self):
-        """Save training data to file"""
-        try:
-            self.ml_trainer.save_training_data()
-            QMessageBox.information(
-                self,
-                "Success",
-                f"Training data saved successfully.\n"
-                f"File: {self.ml_trainer.config.training_data_path}"
-            )
-        except Exception as e:
-            logger.error(f"Error saving training data: {e}", exc_info=True)
-            QMessageBox.critical(self, "Error", f"Failed to save training data:\n{e}")
+        """Deprecated: previously saved training data to file (no longer used)."""
+        QMessageBox.information(self, "Info", "Saving ML training data is no longer needed.\nData for the model comes directly from history and live collection.")
     
     def on_clear_data(self):
         """Clear all training data"""
         reply = QMessageBox.question(
             self,
             "Confirm Clear",
-            "Are you sure you want to clear all training data?",
+            "Are you sure you want to clear all training data?\n\n"
+            "This only clears the ML training dataset in memory.\n"
+            "History (raw records) will remain unchanged.",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No
         )
@@ -274,78 +332,40 @@ class MLControlForm(QDialog):
             self.update_status()
             logger.info("Training data cleared")
     
-    def on_import_history(self):
-        """Import training data from current history"""
-        if not self.parent_window:
-            QMessageBox.warning(self, "Error", "Cannot access parent window")
-            return
-        
-        # Get history from parent window
-        history_service = self.parent_window.history_service
-        history_records = history_service.history
-        
-        if not history_records:
-            QMessageBox.information(
-                self,
-                "No History",
-                "History is empty. No data to import.\n\n"
-                "Connect to BrainLink and collect some events first."
-            )
-            return
-        
-        # Show confirmation with preview
-        total_records = len(history_records)
-        with_events = sum(1 for r in history_records if hasattr(r, 'event_name') and r.event_name)
-        
-        reply = QMessageBox.question(
-            self,
-            "Import from History",
-            f"Found {total_records} records in history.\n"
-            f"Records with events: {with_events}\n\n"
-            f"Import these records as training data?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.Yes
-        )
-        
-        if reply != QMessageBox.Yes:
-            return
-        
-        try:
-            # Import from history
-            imported, skipped = self.ml_trainer.import_from_history(history_records)
-            
-            # Update status
-            self.update_status()
-            
-            # Show result
-            QMessageBox.information(
-                self,
-                "Import Complete",
-                f"Successfully imported {imported} samples from history.\n"
-                f"Skipped {skipped} records (no event or invalid).\n\n"
-                f"You can now train the model!"
-            )
-            
-            logger.info(f"Imported {imported} samples from history")
-        
-        except Exception as e:
-            logger.error(f"Error importing from history: {e}", exc_info=True)
-            QMessageBox.critical(
-                self,
-                "Import Failed",
-                f"Failed to import from history:\n{e}"
-            )
-    
     def on_train_clicked(self):
-        """Train the ML model"""
-        # Check if can train
+        """Train the ML model or reset it if there is no data"""
+        # Special case: no training data at all -> offer to reset (clear) model
+        stats = self.ml_trainer.get_training_stats()
+        total_samples = sum(stats.values())
+        if total_samples == 0:
+            reply = QMessageBox.question(
+                self,
+                "Reset Model",
+                "There is no training data (history is effectively empty).\n\n"
+                "Do you want to reset (clear) the current ML model,\n"
+                "so you can start collecting a fresh dataset?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply == QMessageBox.Yes:
+                self.ml_trainer.reset_model()
+                self.update_status()
+                QMessageBox.information(
+                    self,
+                    "Model Reset",
+                    "ML model has been reset.\n\n"
+                    "You can now start collecting new data and retrain."
+                )
+            return
+
+        # Normal path: there is data, check if we can train
         can_train, reason = self.ml_trainer.can_train()
         if not can_train:
             QMessageBox.warning(
                 self,
                 "Cannot Train",
                 f"Cannot train model:\n{reason}\n\n"
-                f"Please collect more training data first."
+                f"Please collect more balanced training data first."
             )
             return
         
@@ -501,6 +521,52 @@ class MLControlForm(QDialog):
     def refresh_stats(self):
         """Refresh statistics display (called after training)"""
         self.update_status()
+
+    def _add_weight_slider(self, parent_layout: QVBoxLayout, feature_key: str, title: str):
+        """Add a weight slider row (0..100 -> 0.00..1.00)."""
+        row = QHBoxLayout()
+        row.addWidget(QLabel(f"{title}:"))
+
+        slider = QSlider(Qt.Horizontal)
+        slider.setRange(0, 100)
+        slider.setSingleStep(1)
+        slider.setPageStep(5)
+
+        weights = getattr(self.ml_trainer.config, "feature_weights", {}) or {}
+        initial = float(weights.get(feature_key, 1.0))
+        initial = max(0.0, min(1.0, initial))
+        slider.setValue(int(round(initial * 100)))
+
+        value_lbl = QLabel(f"{initial:.2f}")
+        value_lbl.setMinimumWidth(40)
+        value_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
+        def on_change(v: int):
+            w = float(v) / 100.0
+            self._set_feature_weight(feature_key, w)
+            value_lbl.setText(f"{w:.2f}")
+
+        slider.valueChanged.connect(on_change)
+
+        self._weight_sliders[feature_key] = slider
+        self._weight_value_labels[feature_key] = value_lbl
+
+        row.addWidget(slider, stretch=1)
+        row.addWidget(value_lbl)
+        parent_layout.addLayout(row)
+
+    def _set_feature_weight(self, feature_key: str, weight: float):
+        """Update feature weight in both trainer and predictor configs."""
+        weight = max(0.0, min(1.0, float(weight)))
+
+        for cfg in (self.ml_trainer.config, self.ml_predictor.config):
+            weights = getattr(cfg, "feature_weights", None)
+            if weights is None:
+                cfg.feature_weights = {}
+                weights = cfg.feature_weights
+            weights[feature_key] = weight
+
+        logger.info(f"Feature weight updated: {feature_key}={weight:.2f}")
     
     def on_save_model_clicked(self):
         """Save trained model to file"""

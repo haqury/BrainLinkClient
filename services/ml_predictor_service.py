@@ -177,19 +177,22 @@ class MLPredictorService:
             return None
     
     def _eeg_to_features(self, eeg_data: BrainLinkModel) -> list:
-        """Convert EEG data to feature vector"""
-        return [
-            float(eeg_data.attention),
-            float(eeg_data.meditation),
-            float(eeg_data.delta),
-            float(eeg_data.theta),
-            float(eeg_data.low_alpha),
-            float(eeg_data.high_alpha),
-            float(eeg_data.low_beta),
-            float(eeg_data.high_beta),
-            float(eeg_data.low_gamma),
-            float(eeg_data.high_gamma)
-        ]
+        """Convert EEG data to weighted feature vector"""
+        raw = {
+            "attention": float(eeg_data.attention),
+            "meditation": float(eeg_data.meditation),
+            "delta": float(eeg_data.delta),
+            "theta": float(eeg_data.theta),
+            "low_alpha": float(eeg_data.low_alpha),
+            "high_alpha": float(eeg_data.high_alpha),
+            "low_beta": float(eeg_data.low_beta),
+            "high_beta": float(eeg_data.high_beta),
+            "low_gamma": float(eeg_data.low_gamma),
+            "high_gamma": float(eeg_data.high_gamma),
+        }
+        weights = getattr(self.config, "feature_weights", {}) or {}
+        ordered = MLTrainingData.feature_names()
+        return [raw[name] * float(weights.get(name, 1.0)) for name in ordered]
     
     def is_ready(self) -> bool:
         """

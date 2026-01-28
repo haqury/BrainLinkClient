@@ -1,7 +1,7 @@
 """Machine Learning models for EEG event prediction"""
 
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, Optional, Dict
 from datetime import datetime
 
 
@@ -70,7 +70,9 @@ class MLConfig:
     # Training settings
     test_size: float = 0.2
     min_samples_per_class: int = 10
-    min_classes_required: int = 2  # Minimum number of event classes needed for training
+    # Allow training even on a single class (e.g. only 'stop').
+    # As новые классы появляются в данных, авто‑тренировка переобучит модель.
+    min_classes_required: int = 1
     
     # Auto-training settings
     auto_train_enabled: bool = True  # Enable automatic training when new samples added
@@ -79,6 +81,22 @@ class MLConfig:
     # Prediction settings
     confidence_threshold: float = 0.6  # Minimum confidence for prediction
     invert_ml_mr: bool = False  # Invert ml/mr predictions (fix if model predicts backwards)
+
+    # Feature weighting:
+    # Allows down-weighting certain inputs (e.g. attention/meditation) so they
+    # have less influence on the prediction. 1.0 = unchanged, 0.0 = ignored.
+    feature_weights: Dict[str, float] = field(default_factory=lambda: {
+        "attention": 0.2,
+        "meditation": 0.2,
+        "delta": 1.0,
+        "theta": 1.0,
+        "low_alpha": 1.0,
+        "high_alpha": 1.0,
+        "low_beta": 1.0,
+        "high_beta": 1.0,
+        "low_gamma": 1.0,
+        "high_gamma": 1.0,
+    })
     
     # File paths
     model_path: str = "models_ml/brainlink_classifier.pkl"

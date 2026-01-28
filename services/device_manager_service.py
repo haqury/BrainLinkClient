@@ -156,6 +156,10 @@ class DeviceManagerService(QObject):
     
     def save_last_device(self, device: DeviceInfo):
         """Save last connected device to config"""
+        # Do not persist simulator as "last device" for auto-connect logic
+        if device.is_simulator:
+            logger.info("Simulator selected - not saving as last_device")
+            return
         self.last_device = device
         self._save_config()
         logger.info(f"Saved last device: {device}")

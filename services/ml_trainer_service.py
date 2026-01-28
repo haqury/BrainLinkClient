@@ -54,6 +54,7 @@ def _train_model_in_process(training_data_json: str, config_dict: dict, result_q
         import numpy as np
         import pickle
         import tempfile
+        from collections import Counter
         from datetime import datetime
         from sklearn.ensemble import RandomForestClassifier
         from sklearn.svm import SVC
@@ -85,17 +86,51 @@ def _train_model_in_process(training_data_json: str, config_dict: dict, result_q
         # Create config
         config = MLConfig(**config_dict)
         
-        # Prepare data
-        X = np.array([sample.to_features() for sample in training_data])
+        # Prepare data (apply feature weights from config)
+        feature_names = MLTrainingData.feature_names()
+        weights = getattr(config, "feature_weights", {}) or {}
+        weight_vec = np.array([float(weights.get(name, 1.0)) for name in feature_names], dtype=float)
+        X = np.array([sample.to_features() for sample in training_data], dtype=float) * weight_vec
         y = np.array([sample.event for sample in training_data])
         
-        # Split data
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y,
-            test_size=config.test_size,
-            random_state=config.random_state,
-            stratify=y
-        )
+        # Decide how to split data based on dataset size / class counts.
+        # sklearn's train_test_split with stratify requires at least 2 samples
+        # for every class. For very small datasets or when some classes have
+        # only 1 sample, we fall back to a simpler strategy.
+        if len(y) < 2:
+            # Not enough data to create a real train/test split
+            X_train, y_train = X, y
+            X_test, y_test = X, y
+        else:
+            class_counts = Counter(y)
+            min_class_count = min(class_counts.values())
+            
+            if min_class_count >= 2:
+                # Safe to use stratified split
+                X_train, X_test, y_train, y_test = train_test_split(
+                    X,
+                    y,
+                    test_size=config.test_size,
+                    random_state=config.random_state,
+                    stratify=y,
+                )
+            else:
+                # Too few samples in at least one class for stratify.
+                # Use a simple random split without stratification; if this
+                # still fails due to tiny dataset, fall back to using all
+                # data for both train and test.
+                try:
+                    X_train, X_test, y_train, y_test = train_test_split(
+                        X,
+                        y,
+                        test_size=config.test_size,
+                        random_state=config.random_state,
+                        stratify=None,
+                    )
+                except ValueError:
+                    # As a last resort, use all data for both train and test.
+                    X_train, y_train = X, y
+                    X_test, y_test = X, y
         
         # Create model
         if config.model_type == 'random_forest':
@@ -137,6 +172,12 @@ def _train_model_in_process(training_data_json: str, config_dict: dict, result_q
         with open(temp_path, 'wb') as f:
             pickle.dump(model, f)
         
+        # Calculate event distribution from training data
+        event_distribution = {}
+        for sample in training_data:
+            event = sample.event
+            event_distribution[event] = event_distribution.get(event, 0) + 1
+        
         # Return metrics
         metrics = {
             'train_accuracy': train_accuracy,
@@ -146,7 +187,8 @@ def _train_model_in_process(training_data_json: str, config_dict: dict, result_q
             'model_type': config.model_type,
             'classification_report': classification_report(y_test, y_pred_test),
             'confusion_matrix': confusion_matrix(y_test, y_pred_test).tolist(),
-            'model_path': temp_path  # Path to saved model
+            'model_path': temp_path,  # Path to saved model
+            'event_distribution': event_distribution  # Distribution of events in training data
         }
         
         result_queue.put(('success', metrics))
@@ -199,10 +241,12 @@ class MLTrainerService(QObject):
         self.auto_train_min_new_samples = getattr(self.config, 'auto_train_min_new_samples', 5)
         self._samples_since_last_train = 0
         
-        # Load existing training data if available
-        self._load_training_data()
+        # NOTE:
+        # Previously we loaded/saved separate ml_training_data JSON file here.
+        # Now training data is derived from history and runtime only,
+        # so we intentionally DO NOT load any standalone training_data from disk.
         
-        logger.info("MLTrainerService initialized")
+        logger.info("MLTrainerService initialized (training_data now derived from history/runtime only)")
     
     def add_training_sample(self, data: MLTrainingData):
         """
@@ -216,9 +260,6 @@ class MLTrainerService(QObject):
             self._samples_since_last_train += 1
         
         logger.debug(f"Added training sample: event={data.event}, features={len(data.to_features())}")
-        
-        # Auto-save training data (outside lock to avoid blocking)
-        self.save_training_data()
         
         # Check if we should auto-train (outside lock)
         if self.auto_train_enabled:
@@ -491,36 +532,16 @@ class MLTrainerService(QObject):
         return self._is_training
     
     def save_training_data(self):
-        """Save training data to file"""
-        try:
-            path = Path(self.config.training_data_path)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            
-            # Convert to JSON-serializable format
-            data_list = []
-            for sample in self.training_data:
-                data_list.append({
-                    'attention': sample.attention,
-                    'meditation': sample.meditation,
-                    'delta': sample.delta,
-                    'theta': sample.theta,
-                    'low_alpha': sample.low_alpha,
-                    'high_alpha': sample.high_alpha,
-                    'low_beta': sample.low_beta,
-                    'high_beta': sample.high_beta,
-                    'low_gamma': sample.low_gamma,
-                    'high_gamma': sample.high_gamma,
-                    'event': sample.event,
-                    'timestamp': sample.timestamp.isoformat()
-                })
-            
-            with open(path, 'w', encoding='utf-8') as f:
-                json.dump(data_list, f, indent=2)
-            
-            logger.info(f"Saved {len(self.training_data)} training samples to {path}")
+        """
+        Deprecated: previously saved training data to a separate JSON file.
         
-        except Exception as e:
-            logger.error(f"Error saving training data: {e}", exc_info=True)
+        Training data is now derived from history/runtime only, so this method
+        is kept as a no-op for backward compatibility.
+        """
+        logger.info(
+            "save_training_data() called but is now a no-op: "
+            "training data is derived from history and not saved to a separate file."
+        )
     
     def _load_training_data(self):
         """Load training data from file"""
@@ -696,18 +717,42 @@ class MLTrainerService(QObject):
             training_data_copy = list(self.training_data)
         
         # Prepare data outside lock (numpy operations can be slow)
-        X = np.array([sample.to_features() for sample in training_data_copy])
+        feature_names = MLTrainingData.feature_names()
+        weights = getattr(self.config, "feature_weights", {}) or {}
+        weight_vec = np.array([float(weights.get(name, 1.0)) for name in feature_names], dtype=float)
+        X = np.array([sample.to_features() for sample in training_data_copy], dtype=float) * weight_vec
         y = np.array([sample.event for sample in training_data_copy])
         
         logger.info(f"Training data shape: X={X.shape}, y={y.shape}")
         
-        # Split data
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y,
-            test_size=self.config.test_size,
-            random_state=self.config.random_state,
-            stratify=y
-        )
+        # Split data (robust for small / imbalanced datasets)
+        from collections import Counter
+        if len(y) < 2:
+            X_train, y_train = X, y
+            X_test, y_test = X, y
+        else:
+            class_counts = Counter(y)
+            min_class_count = min(class_counts.values())
+            if min_class_count >= 2:
+                X_train, X_test, y_train, y_test = train_test_split(
+                    X,
+                    y,
+                    test_size=self.config.test_size,
+                    random_state=self.config.random_state,
+                    stratify=y,
+                )
+            else:
+                try:
+                    X_train, X_test, y_train, y_test = train_test_split(
+                        X,
+                        y,
+                        test_size=self.config.test_size,
+                        random_state=self.config.random_state,
+                        stratify=None,
+                    )
+                except ValueError:
+                    X_train, y_train = X, y
+                    X_test, y_test = X, y
         
         # Create model
         if self.config.model_type == 'random_forest':
@@ -843,3 +888,18 @@ class MLTrainerService(QObject):
         """Clear all training data"""
         self.training_data.clear()
         logger.info("Training data cleared")
+
+    def reset_model(self):
+        """
+        Reset (clear) the trained model.
+        
+        This is used when the user wants to 'train' on empty data to wipe the
+        current model and start fresh. It clears the in-memory model and
+        last training metrics. The model file on disk is NOT removed here to
+        avoid accidental data loss; it simply won't be used anymore unless
+        explicitly loaded again.
+        """
+        self.model = None
+        self.is_trained = False
+        self.last_training_metrics = None
+        logger.info("ML model has been reset (no trained model is currently loaded)")

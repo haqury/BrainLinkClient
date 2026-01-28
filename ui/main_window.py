@@ -17,6 +17,7 @@ from pybrainlink import BrainLinkModel, BrainLinkExtendModel
 from models.eeg_models import EegHistoryModel, ConfigParams, EegFaultModel
 from models.event_types import EventType
 from config_defaults import get_default_config, DEFAULT_HISTORY_PATH
+from pathlib import Path
 from services.history_service import HistoryService
 from services.mouse_service import MouseService
 from services.head_tracker_service import HeadTracker
@@ -60,6 +61,10 @@ class MainWindow(QMainWindow):
         
         # Configuration - load defaults from config_defaults.py
         self.config = get_default_config()
+
+        # History file path (persisted between sessions)
+        self._history_config_path = Path("config/history_config.json")
+        self._history_path = self._load_history_path()
         
         # Child windows
         self.connect_form = None
@@ -321,7 +326,7 @@ class MainWindow(QMainWindow):
         
         file_layout = QHBoxLayout()
         file_layout.addWidget(QLabel("File Path:"))
-        self.txt_filepath = QLineEdit(DEFAULT_HISTORY_PATH)
+        self.txt_filepath = QLineEdit(self._history_path)
         file_layout.addWidget(self.txt_filepath)
         
         self.btn_browse = QPushButton("Browse")
@@ -430,19 +435,35 @@ class MainWindow(QMainWindow):
                 self,
                 "Bluetooth Not Available",
                 f"{bt_message}\n\n"
-                f"Would you like to enable Bluetooth?\n\n"
+                f"Would you like to enable Bluetooth now?\n\n"
                 f"Note: You may need to enable it in Windows Settings.",
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.Yes
             )
             
             if reply == QMessageBox.Yes:
+                # Inform user to enable BT and then retry scan automatically
                 QMessageBox.information(
                     self,
                     "Enable Bluetooth",
                     "Please enable Bluetooth in Windows Settings.\n\n"
-                    "After enabling, click 'Rescan' button to search for devices."
+                    "After enabling, click 'OK' to start device scan."
                 )
+                # Re-check Bluetooth availability once user clicks OK
+                bt_available, bt_message = DeviceManagerService.check_bluetooth_available()
+                if not bt_available:
+                    logger.warning(f"Bluetooth still not available after user prompt: {bt_message}")
+                    QMessageBox.warning(
+                        self,
+                        "Bluetooth Still Not Available",
+                        f"{bt_message}\n\n"
+                        "Device scan will be skipped. You can enable Bluetooth later and use 'Rescan'."
+                    )
+                    return
+            else:
+                # User chose not to enable BT, skip initial scan
+                logger.info("User chose not to enable Bluetooth, skipping initial scan.")
+                return
         
         # Start initial scan
         logger.info("Starting initial device scan...")
@@ -455,12 +476,14 @@ class MainWindow(QMainWindow):
         # Block signals while updating
         self.cmb_devices.blockSignals(True)
         
-        # Remember current selection
+        # Remember current REAL-device selection (ignore simulator)
         current_address = None
         if self.cmb_devices.currentIndex() >= 0:
             current_data = self.cmb_devices.currentData()
-            if current_data:
+            if current_data and not getattr(current_data, "is_simulator", False):
                 current_address = current_data.address
+            else:
+                logger.debug("Current selection is simulator or empty; treating as no real device selected.")
         
         # Clear and repopulate
         self.cmb_devices.clear()
@@ -476,7 +499,7 @@ class MainWindow(QMainWindow):
                     self.cmb_devices.setCurrentIndex(i)
                     break
         else:
-            # Select last device if available
+            # Select last real device if available
             last_device = self.device_manager.get_last_device()
             if last_device:
                 for i in range(self.cmb_devices.count()):
@@ -485,19 +508,41 @@ class MainWindow(QMainWindow):
                         self.cmb_devices.setCurrentIndex(i)
                         logger.info(f"Selected last device: {last_device}")
                         break
+            else:
+                # No last device saved yet: if there is exactly one real device (plus simulator),
+                # select it automatically for convenience.
+                real_devices = [
+                    (i, self.cmb_devices.itemData(i))
+                    for i in range(self.cmb_devices.count())
+                    if self.cmb_devices.itemData(i) and not self.cmb_devices.itemData(i).is_simulator
+                ]
+                if len(real_devices) == 1:
+                    idx, dev = real_devices[0]
+                    self.cmb_devices.setCurrentIndex(idx)
+                    logger.info(f"Auto-selected only real device: {dev}")
         
         # Unblock signals
         self.cmb_devices.blockSignals(False)
         
-        # Auto-connect if scan just finished and we have a selection
+        # Auto-connect if scan just finished and we have a meaningful selection
         if self.cmb_devices.currentIndex() >= 0:
             selected_device = self.cmb_devices.currentData()
             if selected_device and not selected_device.is_simulator:
-                # Auto-connect after scan if not simulator
                 last_device = self.device_manager.get_last_device()
+                # Auto-connect if this is the last real device OR the only real device we found
                 if last_device and last_device.address == selected_device.address:
                     logger.info(f"Auto-connecting to last device: {selected_device}")
                     QTimer.singleShot(1000, lambda: self.on_device_selected(self.cmb_devices.currentIndex()))
+                else:
+                    # If there is only one real device and it's selected, also auto-connect
+                    real_devices = [
+                        self.cmb_devices.itemData(i)
+                        for i in range(self.cmb_devices.count())
+                        if self.cmb_devices.itemData(i) and not self.cmb_devices.itemData(i).is_simulator
+                    ]
+                    if len(real_devices) == 1 and real_devices[0].address == selected_device.address:
+                        logger.info(f"Auto-connecting to single real device: {selected_device}")
+                        QTimer.singleShot(1000, lambda: self.on_device_selected(self.cmb_devices.currentIndex()))
     
     def on_scan_started(self):
         """Handle scan start"""
@@ -544,13 +589,6 @@ class MainWindow(QMainWindow):
             from services.device_simulator import SimulatorController
             self.simulator = SimulatorController(self)
             self.simulator.connect()
-            
-            QMessageBox.information(
-                self,
-                "Simulator Started",
-                "✅ Device simulator is now running!\n\n"
-                "You should see EEG data updating."
-            )
         else:
             # Connect to real device
             logger.info(f"Connecting to real device: {device.address}")
@@ -615,10 +653,45 @@ class MainWindow(QMainWindow):
             except:
                 pass
         logger.info(f"Minimize to tray: {'enabled' if self._minimize_to_tray else 'disabled'}")
+
+    # ==================== History path persistence ====================
+    def _load_history_path(self) -> str:
+        """
+        Load last used history file path from config/history_config.json.
+        Falls back to DEFAULT_HISTORY_PATH if config is missing or invalid.
+        """
+        try:
+            if self._history_config_path.exists():
+                import json
+                with open(self._history_config_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                path = data.get("history_path") or DEFAULT_HISTORY_PATH
+                return path
+        except Exception as e:
+            logger.warning(f"Failed to load history path config: {e}")
+        return DEFAULT_HISTORY_PATH
+
+    def _save_history_path(self, path: str) -> None:
+        """Save last used history file path to config/history_config.json."""
+        try:
+            self._history_config_path.parent.mkdir(parents=True, exist_ok=True)
+            import json
+            with open(self._history_config_path, "w", encoding="utf-8") as f:
+                json.dump({"history_path": path}, f, indent=2, ensure_ascii=False)
+            logger.info(f"Saved history path to {self._history_config_path}: {path}")
+        except Exception as e:
+            logger.error(f"Failed to save history path config: {e}", exc_info=True)
+
+    def _update_history_path_from_ui(self) -> None:
+        """Update internal history path from txt_filepath and persist it."""
+        path = self.txt_filepath.text().strip()
+        if path:
+            self._history_path = path
+            self._save_history_path(path)
     
     def on_browse_clicked(self):
         """Handle browse button click"""
-        file_path, _ = QFileDialog.getSaveFileName(
+        file_path, _ = QFileDialog.getOpenFileName(
             self,
             "Select History File",
             "C:/BLconfig",
@@ -626,21 +699,45 @@ class MainWindow(QMainWindow):
         )
         if file_path:
             self.txt_filepath.setText(file_path)
+            self._update_history_path_from_ui()
 
     def on_save_clicked(self):
         """Handle save button click"""
-        self.history_service.save(self.txt_filepath.text())
+        self._update_history_path_from_ui()
+        self.history_service.save(self._history_path)
         self.update_counter()
 
     def on_load_clicked(self):
         """Handle load button click"""
-        self.history_service.load(self.txt_filepath.text())
+        self._update_history_path_from_ui()
+        self.history_service.load(self._history_path)
         self.update_counter()
+        
+        # Keep ML training data in sync with loaded history:
+        # clear existing training_data and rebuild it from the newly loaded history.
+        try:
+            self.ml_trainer.clear_training_data()
+            imported, skipped = self.ml_trainer.import_from_history(self.history_service.history)
+            logger.info(f"Rebuilt ML training data from history: imported={imported}, skipped={skipped}")
+            
+            # Update ML Control window if it's open
+            if self.ml_control_form and self.ml_control_form.isVisible():
+                self.ml_control_form.update_status()
+        except Exception as e:
+            logger.error(f"Error rebuilding ML training data from history: {e}", exc_info=True)
 
     def on_clear_clicked(self):
         """Handle clear button click"""
         self.history_service.clear()
         self.update_counter()
+        
+        # Also clear ML training data so that it stays consistent with history
+        try:
+            self.ml_trainer.clear_training_data()
+            if self.ml_control_form and self.ml_control_form.isVisible():
+                self.ml_control_form.update_status()
+        except Exception as e:
+            logger.error(f"Error clearing ML training data: {e}", exc_info=True)
 
     def on_config_clicked(self):
         """Handle config button click"""
@@ -1122,20 +1219,9 @@ class MainWindow(QMainWindow):
         # Update UI
         self.btn_disconnect.setEnabled(True)
         self.cmb_devices.setEnabled(False)  # Disable device selection while connected
-        
-        QMessageBox.information(
-            self,
-            "Connected",
-            f"Successfully connected to device:\n{address}"
-        )
-        
-        # Update tray status and notification
+
+        # Update tray status (no popup notification for now)
         self.tray_icon.update_status(connected=True)
-        self.tray_icon.show_message(
-            "BrainLink Client",
-            f"Connected to {address}",
-            QSystemTrayIcon.Information
-        )
     
     def on_eeg_data_event(self, model: BrainLinkModel):
         """Handle EEG data event (called from device)"""
@@ -1143,11 +1229,18 @@ class MainWindow(QMainWindow):
 
     def on_eeg_data_updated(self, model: BrainLinkModel):
         """Handle EEG data in main thread"""
-        # Get event name (rule-based or ML-based)
-        event_name = self.get_event_name()  # Default: rule-based
+        # Get ground-truth label from rule-based / manual selection
+        # (used for training data collection).
+        label_event_name = self.get_event_name()
+        
+        # This event_name is what will actually be used for control / game,
+        # and may later be overridden by ML prediction.
+        event_name = label_event_name
         event_source = "rule-based"  # Track where event came from
         
-        # Use ML prediction if enabled
+        # Use ML prediction if enabled (for control / game output).
+        # Обучающие данные всегда берём из label_event_name, чтобы
+        # модель не училась на собственных предсказаниях.
         if self._use_ml_prediction:
             try:
                 if self.ml_predictor.is_ready():
@@ -1187,8 +1280,8 @@ class MainWindow(QMainWindow):
                 event_name = ""
                 event_source = "ml-error"
         else:
-            # ML prediction disabled - use rule-based (only if ML is explicitly disabled)
-            event_name = self.get_event_name()
+            # ML prediction disabled - explicitly use rule-based
+            event_name = label_event_name
             event_source = "rule-based"
             logger.debug(f"ML prediction disabled, using rule-based. event_name={event_name}")
         
@@ -1252,13 +1345,12 @@ class MainWindow(QMainWindow):
         if h.event_name:
             self.history_service.add(h)
         
-        # Collect training data if in training mode
-        # IMPORTANT: Only collect data from rule-based or manual selection, NOT from ML predictions
-        # This prevents feedback loop where ML predictions train the model
+        # Collect training data if in training mode.
+        # ВАЖНО: используем label_event_name (ручной / rule-based),
+        # а не event_name после ML, чтобы не учить модель на своих же предсказаниях.
         if (hasattr(self, '_is_collecting_training_data') and 
             self._is_collecting_training_data and 
-            event_name and 
-            event_source != "ml-prediction"):  # Don't collect ML predictions!
+            label_event_name):
             
             from models.ml_models import MLTrainingData
             training_sample = MLTrainingData(
@@ -1272,10 +1364,10 @@ class MainWindow(QMainWindow):
                 high_beta=model.high_beta,
                 low_gamma=model.low_gamma,
                 high_gamma=model.high_gamma,
-                event=event_name
+                event=label_event_name
             )
             self.ml_trainer.add_training_sample(training_sample)
-            logger.debug(f"Added training sample for event: {event_name} (source: {event_source})")
+            logger.debug(f"Added training sample for event: {label_event_name} (source: rule-based label)")
             self.update_counter()
             
             # Update ML Control form if it's open
