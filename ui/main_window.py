@@ -122,9 +122,6 @@ class MainWindow(QMainWindow):
         self.ml_trainer.auto_training_failed.connect(self.on_auto_training_failed)
         self.ml_trainer.model_updated.connect(self.on_model_updated)
         
-        # Show tray icon
-        self.tray_icon.show()
-        
         logger.info("MainWindow initialized with system tray")
         
         # Initialize devices on startup
@@ -1553,6 +1550,11 @@ class MainWindow(QMainWindow):
         self.activateWindow()
         self.raise_()
         logger.info("Window restored from tray")
+        # На всякий случай убеждаемся, что иконка в трее видима
+        try:
+            self.tray_icon.show()
+        except Exception:
+            pass
     
     def quit_application(self):
         """Properly quit the application with cleanup"""

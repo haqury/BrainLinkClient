@@ -37,25 +37,52 @@ class TrayIcon(QObject):
         # Connect signals
         self.tray_icon.activated.connect(self._on_tray_activated)
         
-        logger.info("System tray icon initialized")
+        # Check system tray availability and show icon immediately
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            logger.warning("System tray is not available - tray icon may not be shown")
+        else:
+            self.tray_icon.show()
+            # Принудительно показываем уведомление при старте, чтобы Windows зарегистрировал иконку
+            # Это помогает в exe-версии, где иконка может не появиться без уведомления
+            from PyQt5.QtCore import QTimer
+            QTimer.singleShot(500, lambda: self._force_show_with_notification())
+            logger.info("System tray icon initialized and shown")
     
     def _create_icon(self):
         """Create tray icon"""
-        # Try to load custom icon, fallback to default
+        import sys
+        import os
+        
+        icon_path = None
+        
+        # В exe PyInstaller ресурсы находятся в sys._MEIPASS
+        if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+            icon_path = os.path.join(sys._MEIPASS, 'resources', 'icon.png')
+        else:
+            # Обычный запуск из Python
+            icon_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'resources', 'icon.png')
+        
         try:
-            icon = QIcon("resources/icon.png")
-            if icon.isNull():
-                raise FileNotFoundError("Icon file not found")
-            self.tray_icon.setIcon(icon)
-            logger.info("Loaded custom tray icon from resources/icon.png")
+            if icon_path and os.path.exists(icon_path):
+                icon = QIcon(icon_path)
+                if not icon.isNull():
+                    self.tray_icon.setIcon(icon)
+                    logger.info(f"Loaded custom tray icon from {icon_path}")
+                    self.tray_icon.setToolTip("BrainLink Client - Double-click to show")
+                    return
         except Exception as e:
-            # Use more visible Qt icon as fallback
+            logger.warning(f"Failed to load icon from {icon_path}: {e}")
+        
+        # Fallback: используем стандартную иконку Qt
+        try:
             from PyQt5.QtWidgets import QStyle, QApplication
             style = QApplication.style()
-            # Use MessageBoxInformation icon - more visible than Computer
-            icon = style.standardIcon(QStyle.SP_MessageBoxInformation)
+            # Используем более заметную иконку
+            icon = style.standardIcon(QStyle.SP_ComputerIcon)
             self.tray_icon.setIcon(icon)
-            logger.info(f"Using default tray icon (MessageBoxInformation): {e}")
+            logger.info("Using default Qt tray icon (SP_ComputerIcon)")
+        except Exception as e:
+            logger.error(f"Failed to set any tray icon: {e}")
         
         self.tray_icon.setToolTip("BrainLink Client - Double-click to show")
     
@@ -102,6 +129,11 @@ class TrayIcon(QObject):
     
     def show(self):
         """Show tray icon"""
+        # В exe под Windows QSystemTrayIcon иногда не появляется с первого раза.
+        # Принудительно проверяем доступность и повторно вызываем show().
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            logger.warning("System tray is not available (show() called)")
+            return
         if not self.tray_icon.isVisible():
             self.tray_icon.show()
             logger.info("Tray icon shown")
@@ -138,6 +170,26 @@ class TrayIcon(QObject):
         """
         self.tray_icon.showMessage(title, message, icon, duration)
         logger.info(f"Tray notification: {title} - {message}")
+    
+    def _force_show_with_notification(self):
+        """Force show tray icon with notification to ensure Windows registers it"""
+        try:
+            # Повторно показываем иконку
+            if not self.tray_icon.isVisible():
+                self.tray_icon.show()
+                logger.info("Tray icon force-shown")
+            
+            # Показываем краткое уведомление - это заставляет Windows зарегистрировать иконку
+            # В Windows 11 иконки часто не появляются до первого уведомления
+            self.tray_icon.showMessage(
+                "BrainLink Client",
+                "Application started",
+                QSystemTrayIcon.Information,
+                1000  # Очень короткое уведомление, чтобы не мешать
+            )
+            logger.debug("Startup notification shown to force tray icon registration")
+        except Exception as e:
+            logger.warning(f"Error forcing tray icon show: {e}")
     
     def cleanup(self):
         """Cleanup tray icon"""

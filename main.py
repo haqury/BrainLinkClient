@@ -26,6 +26,9 @@ def main():
     try:
         # Create Qt application
         app = QApplication(sys.argv)
+        # Allow app to stay живым, даже когда главное окно закрыто,
+        # чтобы треевый значок продолжал работать.
+        app.setQuitOnLastWindowClosed(False)
         app.setApplicationName("BrainLink Client")
         app.setOrganizationName("BrainLink")
         
@@ -36,6 +39,14 @@ def main():
         window.show()
         
         logger.info("Main window created and shown")
+        
+        # Обрабатываем события, чтобы убедиться что иконка в трее создана
+        app.processEvents()
+        
+        # Даём Windows время зарегистрировать иконку в трее
+        # Это особенно важно для exe-версии
+        from PyQt5.QtCore import QTimer
+        QTimer.singleShot(1000, lambda: window.tray_icon._force_show_with_notification())
         
         # Run application event loop
         exit_code = app.exec_()
