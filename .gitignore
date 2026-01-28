@@ -49,3 +49,6 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Trained ML models (generated artifacts)
+/models_ml/
