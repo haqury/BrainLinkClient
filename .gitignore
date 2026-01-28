@@ -52,3 +52,6 @@ Thumbs.db
 
 # Trained ML models (generated artifacts)
 /models_ml/
+
+# Release artifacts
+/release/
