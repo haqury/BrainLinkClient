@@ -162,6 +162,42 @@ class MLControlForm(QDialog):
         self.chk_invert_ml_mr.stateChanged.connect(self.on_invert_ml_mr_changed)
         prediction_layout.addWidget(self.chk_invert_ml_mr)
 
+        # Confidence threshold slider
+        confidence_row = QHBoxLayout()
+        confidence_row.addWidget(QLabel("Confidence threshold:"))
+        
+        self.confidence_slider = QSlider(Qt.Horizontal)
+        self.confidence_slider.setRange(0, 100)  # 0.00 to 1.00
+        self.confidence_slider.setSingleStep(1)
+        self.confidence_slider.setPageStep(5)
+        
+        initial_threshold = self.ml_trainer.config.confidence_threshold
+        initial_threshold = max(0.0, min(1.0, float(initial_threshold)))
+        self.confidence_slider.setValue(int(round(initial_threshold * 100)))
+        
+        self.confidence_label = QLabel(f"{initial_threshold:.2f}")
+        self.confidence_label.setMinimumWidth(40)
+        self.confidence_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        
+        def on_confidence_change(v: int):
+            threshold = float(v) / 100.0
+            self.ml_trainer.config.confidence_threshold = threshold
+            self.ml_predictor.config.confidence_threshold = threshold
+            self.confidence_label.setText(f"{threshold:.2f}")
+            logger.info(f"Confidence threshold updated: {threshold:.2f}")
+        
+        self.confidence_slider.valueChanged.connect(on_confidence_change)
+        
+        confidence_row.addWidget(self.confidence_slider, stretch=1)
+        confidence_row.addWidget(self.confidence_label)
+        
+        confidence_info = QLabel("Minimum confidence for ML prediction (lower = more predictions, higher = more confident only)")
+        confidence_info.setStyleSheet("font-size: 9pt; color: #888;")
+        confidence_info.setWordWrap(True)
+        
+        prediction_layout.addLayout(confidence_row)
+        prediction_layout.addWidget(confidence_info)
+
         # Feature weights (simple sliders)
         weights_group = QGroupBox("Feature weights (lower = less influence)")
         weights_layout = QVBoxLayout()
