@@ -98,12 +98,22 @@ class MLConfig:
         "high_gamma": 1.0,
     })
     
-    # File paths
-    model_path: str = "models_ml/brainlink_classifier.pkl"
-    training_data_path: str = "training_data/ml_training_data.json"
+    # File paths (will be resolved at runtime via path_utils)
+    model_path: str = None  # Will be set dynamically
+    training_data_path: str = None  # Deprecated, not used anymore
     
     def __post_init__(self):
         """Validate configuration"""
+        # Set default model path if not provided
+        # IMPORTANT: Don't import path_utils in worker processes to avoid Qt initialization
+        import os
+        if self.model_path is None and os.environ.get('BRAINLINK_WORKER_PROCESS') != '1':
+            from utils.path_utils import get_models_dir
+            self.model_path = str(get_models_dir() / "brainlink_classifier.pkl")
+        elif self.model_path is None:
+            # In worker process, use relative path
+            self.model_path = "models_ml/brainlink_classifier.pkl"
+        
         if not 0 < self.test_size < 1:
             raise ValueError(f"test_size must be between 0 and 1, got {self.test_size}")
         

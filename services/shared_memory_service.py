@@ -98,6 +98,7 @@ class SharedMemoryService(QObject):
         super().__init__()
         
         self.shm: Optional[shared_memory.SharedMemory] = None
+        self._we_created_shm = False  # True if we created the segment (so we may unlink in stop())
         self.lock: Optional[Lock] = None
         self.is_running = False
         self.layout = SharedMemoryLayout()
@@ -131,13 +132,23 @@ class SharedMemoryService(QObject):
                 logger.info("Cleaned up existing shared memory")
             except FileNotFoundError:
                 pass  # No existing memory, that's fine
+            except OSError as e:
+                # On Windows, unlink can fail if another process (e.g. game) has it open
+                logger.debug(f"Could not unlink existing shared memory: {e}")
             
-            # Create shared memory
-            self.shm = shared_memory.SharedMemory(
-                name=self.MEMORY_NAME,
-                create=True,
-                size=self.layout.TOTAL_SIZE
-            )
+            # Create or attach to shared memory
+            try:
+                self.shm = shared_memory.SharedMemory(
+                    name=self.MEMORY_NAME,
+                    create=True,
+                    size=self.layout.TOTAL_SIZE
+                )
+                self._we_created_shm = True
+            except FileExistsError:
+                # Segment still exists (e.g. game or previous run). Attach to it and use it.
+                logger.info("Shared memory segment already exists, attaching to it")
+                self.shm = shared_memory.SharedMemory(name=self.MEMORY_NAME, create=False)
+                self._we_created_shm = False
             
             # Create lock for thread-safe access
             self.lock = Lock()
@@ -177,7 +188,11 @@ class SharedMemoryService(QObject):
             
             if self.shm:
                 self.shm.close()
-                self.shm.unlink()
+                if getattr(self, '_we_created_shm', True):
+                    try:
+                        self.shm.unlink()
+                    except OSError as e:
+                        logger.debug(f"Could not unlink shared memory on stop: {e}")
                 self.shm = None
             
             self.lock = None

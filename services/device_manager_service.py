@@ -93,8 +93,11 @@ class DeviceManagerService(QObject):
         is_simulator=True
     )
     
-    def __init__(self, config_path: str = "config/device_config.json"):
+    def __init__(self, config_path: Optional[str] = None):
         super().__init__()
+        if config_path is None:
+            from utils.path_utils import get_config_dir
+            config_path = str(get_config_dir() / "device_config.json")
         self.config_path = Path(config_path)
         self.devices: List[DeviceInfo] = []
         self.scanner: Optional[DeviceScannerThread] = None

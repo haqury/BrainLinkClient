@@ -35,11 +35,22 @@ DEFAULT_MULTI_FAULT = EegFaultModel(
 # Default multi count
 DEFAULT_MULTI_COUNT = 1
 
-# Default config file path
-DEFAULT_CONFIG_PATH = "C:/BLconfig/config.json"
+# Default config file paths (will be resolved at runtime via path_utils)
+# These are relative to app base directory
+DEFAULT_CONFIG_PATH = None  # Will be set dynamically
+DEFAULT_HISTORY_PATH = None  # Will be set dynamically
 
-# Default history file path
-DEFAULT_HISTORY_PATH = "C:/BLconfig/history.json"
+
+def get_default_config_path() -> str:
+    """Get default config file path (relative to app base directory)"""
+    from utils.path_utils import get_config_dir
+    return str(get_config_dir() / "config.json")
+
+
+def get_default_history_path() -> str:
+    """Get default history file path (relative to app base directory)"""
+    from utils.path_utils import get_data_dir
+    return str(get_data_dir() / "history.json")
 
 
 def get_default_config() -> ConfigParams:

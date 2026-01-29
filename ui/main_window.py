@@ -16,7 +16,7 @@ from typing import Optional
 from pybrainlink import BrainLinkModel, BrainLinkExtendModel
 from models.eeg_models import EegHistoryModel, ConfigParams, EegFaultModel
 from models.event_types import EventType
-from config_defaults import get_default_config, DEFAULT_HISTORY_PATH
+from config_defaults import get_default_config, get_default_history_path
 from pathlib import Path
 from services.history_service import HistoryService
 from services.mouse_service import MouseService
@@ -63,7 +63,8 @@ class MainWindow(QMainWindow):
         self.config = get_default_config()
 
         # History file path (persisted between sessions)
-        self._history_config_path = Path("config/history_config.json")
+        from utils.path_utils import get_config_dir
+        self._history_config_path = get_config_dir() / "history_config.json"
         self._history_path = self._load_history_path()
         
         # Child windows
@@ -662,11 +663,12 @@ class MainWindow(QMainWindow):
                 import json
                 with open(self._history_config_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                path = data.get("history_path") or DEFAULT_HISTORY_PATH
-                return path
+                path = data.get("history_path")
+                if path:
+                    return path
         except Exception as e:
             logger.warning(f"Failed to load history path config: {e}")
-        return DEFAULT_HISTORY_PATH
+        return get_default_history_path()
 
     def _save_history_path(self, path: str) -> None:
         """Save last used history file path to config/history_config.json."""
@@ -688,10 +690,11 @@ class MainWindow(QMainWindow):
     
     def on_browse_clicked(self):
         """Handle browse button click"""
+        from utils.path_utils import get_data_dir
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "Select History File",
-            "C:/BLconfig",
+            str(get_data_dir()),
             "JSON Files (*.json)"
         )
         if file_path:

@@ -43,11 +43,19 @@ def _train_model_in_process(training_data_json: str, config_dict: dict, result_q
     This function runs in a completely separate Python process,
     so it won't block the main UI thread even during heavy computation.
     
+    IMPORTANT: This function must NOT import or use any Qt/PyQt code,
+    as it runs in a child process and would create a new Qt application.
+    
     Args:
         training_data_json: JSON string of training data
         config_dict: Configuration dictionary
         result_queue: Queue to send results back
     """
+    # Prevent Qt initialization in child process
+    # Set environment variable to indicate we're in a worker process
+    import os
+    os.environ['BRAINLINK_WORKER_PROCESS'] = '1'
+    
     try:
         # Import here to avoid issues with multiprocessing on Windows
         import json

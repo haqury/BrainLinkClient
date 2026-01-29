@@ -11,14 +11,15 @@ def setup_logging(log_level=logging.INFO):
     Configure logging for the application.
     
     Creates both console and file handlers with proper formatting.
-    Log files are stored in C:/BLconfig/logs/
+    Log files are stored in app_base_dir/logs/
     
     Args:
         log_level: Logging level (default: INFO)
     """
-    # Create logs directory
-    log_dir = Path("C:/BLconfig/logs")
-    log_dir.mkdir(parents=True, exist_ok=True)
+    from utils.path_utils import get_logs_dir
+    
+    # Get logs directory (relative to exe or current dir)
+    log_dir = get_logs_dir()
     
     # Create log filename with timestamp
     log_file = log_dir / f"brainlink_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"

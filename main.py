@@ -59,4 +59,21 @@ def main():
 
 
 if __name__ == '__main__':
+    # On Windows + PyInstaller + multiprocessing we must call freeze_support()
+    # so that child processes (used for ML training) terminate correctly and
+    # не размножаются лишними экземплярами exe.
+    try:
+        import multiprocessing
+        multiprocessing.freeze_support()
+    except Exception:
+        # Safe fallback: if anything goes wrong, just continue.
+        pass
+    
+    # Prevent running main() in worker processes (multiprocessing spawn)
+    import os
+    if os.environ.get('BRAINLINK_WORKER_PROCESS') == '1':
+        # This is a worker process for ML training, don't start Qt app
+        logger.info("Worker process detected, skipping Qt application initialization")
+        sys.exit(0)
+    
     main()

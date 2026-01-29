@@ -203,10 +203,11 @@ class ConfigForm(QDialog):
     
     def on_browse_clicked(self):
         """Handle browse button click"""
+        from utils.path_utils import get_config_dir
         file_path, _ = QFileDialog.getSaveFileName(
             self,
             "Select Config File",
-            "C:/BLconfig",
+            str(get_config_dir()),
             "JSON Files (*.json)"
         )
         if file_path:
