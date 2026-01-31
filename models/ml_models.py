@@ -82,6 +82,11 @@ class MLConfig:
     confidence_threshold: float = 0.6  # Minimum confidence for prediction
     invert_ml_mr: bool = False  # Invert ml/mr predictions (fix if model predicts backwards)
 
+    # Class weights for prediction (ml, mr, mu, md, stop) - from game config prediction_weights
+    class_weights: Dict[str, float] = field(default_factory=lambda: {
+        "ml": 1.0, "mr": 1.0, "mu": 1.0, "md": 1.0, "stop": 1.0
+    })
+
     # Feature weighting:
     # Allows down-weighting certain inputs (e.g. attention/meditation) so they
     # have less influence on the prediction. 1.0 = unchanged, 0.0 = ignored.
@@ -117,7 +122,7 @@ class MLConfig:
         if not 0 < self.test_size < 1:
             raise ValueError(f"test_size must be between 0 and 1, got {self.test_size}")
         
-        if not 0 < self.confidence_threshold <= 1:
+        if not 0 <= self.confidence_threshold <= 1:
             raise ValueError(f"confidence_threshold must be between 0 and 1, got {self.confidence_threshold}")
         
         if self.min_samples_per_class < 1:

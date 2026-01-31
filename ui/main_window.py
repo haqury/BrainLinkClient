@@ -1,5 +1,6 @@
 """Main window for BrainLink Client application"""
 
+import json
 import logging
 import asyncio
 import threading
@@ -16,6 +17,7 @@ from typing import Optional
 from pybrainlink import BrainLinkModel, BrainLinkExtendModel
 from models.eeg_models import EegHistoryModel, ConfigParams, EegFaultModel
 from models.event_types import EventType
+from models.ml_models import MLConfig
 from config_defaults import get_default_config, get_default_history_path
 from pathlib import Path
 from services.history_service import HistoryService
@@ -41,7 +43,7 @@ class MainWindow(QMainWindow):
     connection_error = pyqtSignal(str)  # Signal for connection errors
     connection_success = pyqtSignal(str)  # Signal for successful connection
 
-    def __init__(self):
+    def __init__(self, game_config_path: Optional[str] = None):
         super().__init__()
         
         # Services
@@ -54,8 +56,14 @@ class MainWindow(QMainWindow):
         # Shared Memory for game integration
         self.shared_memory = SharedMemoryService()
         
+        # Store game config path for later (e.g. reload on "save model" command from game)
+        self._game_config_path = game_config_path
+        
+        # ML config: overlay from game config if provided (confidence_threshold, model_path, prediction_weights)
+        ml_config = self._ml_config_from_game_config(game_config_path)
+        
         # ML Services
-        self.ml_trainer = MLTrainerService(parent=self)
+        self.ml_trainer = MLTrainerService(config=ml_config, parent=self)
         self.ml_predictor = MLPredictorService(self.ml_trainer)
         self._use_ml_prediction = False  # Flag to switch between rule-based and ML prediction
         
@@ -136,6 +144,43 @@ class MainWindow(QMainWindow):
             # If shared memory is not enabled, disable game control
             if hasattr(self, 'chk_enable_game_control'):
                 self.chk_enable_game_control.setEnabled(False)
+
+    def _ml_config_from_game_config(self, game_config_path: Optional[str]) -> MLConfig:
+        """
+        Build MLConfig from game config file if provided.
+        Uses brainlink.confidence_threshold, brainlink.model_path, brainlink.prediction_weights.
+        """
+        config = MLConfig()
+        if not game_config_path:
+            return config
+        path = Path(game_config_path)
+        if not path.exists():
+            logger.warning("Game config path does not exist: %s", game_config_path)
+            return config
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            bl = data.get("brainlink", {})
+            if not bl:
+                return config
+            if "confidence_threshold" in bl:
+                config.confidence_threshold = float(bl["confidence_threshold"])
+            if bl.get("model_path"):
+                config.model_path = str(bl["model_path"]).strip()
+            weights = bl.get("prediction_weights")
+            if isinstance(weights, (list, tuple)) and len(weights) >= 4:
+                config.class_weights = {
+                    "ml": float(weights[0]),
+                    "mr": float(weights[1]),
+                    "mu": float(weights[2]),
+                    "md": float(weights[3]),
+                    "stop": float(weights[4]) if len(weights) > 4 else 1.0,
+                }
+            logger.info("ML config loaded from game config: threshold=%.2f, model_path=%s, class_weights=%s",
+                        config.confidence_threshold, config.model_path, config.class_weights)
+        except Exception as e:
+            logger.warning("Failed to load game config for ML: %s", e)
+        return config
 
     def init_ui(self):
         """Initialize the user interface"""
@@ -934,6 +979,35 @@ class MainWindow(QMainWindow):
             command_type = command.get("type", 0)
             event_name = command.get("event", "")
             
+            # Type 3: Save ML model to path from game config (no event needed)
+            if command_type == 3:
+                if not getattr(self, '_game_config_path', None):
+                    logger.warning("Save model command ignored: no game config path (start BrainLink from game)")
+                    return
+                path = Path(self._game_config_path)
+                if not path.exists():
+                    logger.warning("Save model command ignored: game config file not found: %s", path)
+                    return
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    bl = data.get("brainlink", {})
+                    model_path = (bl.get("model_path") or "").strip()
+                    if not model_path:
+                        logger.warning("Save model command: brainlink.model_path is empty in game config")
+                        return
+                    self.ml_trainer.config.model_path = model_path
+                    self.ml_trainer.save_model()
+                    logger.info("Saved ML model to %s (from game config)", model_path)
+                    self.tray_icon.show_message(
+                        "Model Saved",
+                        f"Model saved to: {model_path}",
+                        QSystemTrayIcon.Information
+                    )
+                except Exception as e:
+                    logger.error("Failed to save model from game command: %s", e, exc_info=True)
+                return
+            
             if not event_name:
                 logger.warning("Received command with empty event name")
                 return
@@ -1241,11 +1315,15 @@ class MainWindow(QMainWindow):
         # Use ML prediction if enabled (for control / game output).
         # Обучающие данные всегда берём из label_event_name, чтобы
         # модель не училась на собственных предсказаниях.
+        self._last_ml_confidence = 0.0
+        self._last_ml_probabilities = {}
         if self._use_ml_prediction:
             try:
                 if self.ml_predictor.is_ready():
                     prediction = self.ml_predictor.predict(model)
                     if prediction:
+                        self._last_ml_confidence = prediction.confidence
+                        self._last_ml_probabilities = dict(prediction.probabilities) if prediction.probabilities else {}
                         confidence_threshold = self.ml_trainer.config.confidence_threshold
                         is_confident = prediction.is_confident(confidence_threshold)
                         logger.debug(f"ML prediction: event={prediction.predicted_event}, confidence={prediction.confidence:.2f}, threshold={confidence_threshold}, is_confident={is_confident}")
@@ -1439,7 +1517,9 @@ class MainWindow(QMainWindow):
                 "high_beta": model.high_beta,
                 "low_gamma": model.low_gamma,
                 "high_gamma": model.high_gamma,
-                "event": game_event  # Use event determined above (ML or rule-based)
+                "event": game_event,  # Use event determined above (ML or rule-based)
+                "ml_confidence": getattr(self, '_last_ml_confidence', 0.0),
+                "ml_probabilities": getattr(self, '_last_ml_probabilities', {}),
             }
             # Always call update_eeg_data, even if event hasn't changed (to ensure it persists in shared memory)
             # Log before sending to shared memory (only for non-empty events, and only when it changes)

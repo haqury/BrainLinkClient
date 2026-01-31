@@ -48,13 +48,21 @@ class SharedMemoryLayout:
     
     # === CLIENT -> SERVER COMMANDS (bidirectional communication) ===
     COMMAND_PENDING: int = 21  # offset 84: 1 if command pending, 0 if processed
-    COMMAND_TYPE: int = 22  # offset 88: 1=save_event, 2=save_ml_training
+    COMMAND_TYPE: int = 22  # offset 88: 1=save_event, 2=save_ml_training, 3=save_model
     COMMAND_EVENT_CODE: int = 23  # offset 92: event code to save
     COMMAND_TIMESTAMP: int = 24  # offset 96: client timestamp
     
+    # ML statistics for game HUD (0-1000 = 0.0-1.0)
+    ML_CONFIDENCE: int = 25   # offset 100: confidence * 1000
+    ML_PROB_ML: int = 26      # offset 104
+    ML_PROB_MR: int = 27      # offset 108
+    ML_PROB_MU: int = 28      # offset 112
+    ML_PROB_MD: int = 29      # offset 116
+    ML_PROB_STOP: int = 30    # offset 120
+    
     # Total size
-    TOTAL_FIELDS: int = 25
-    TOTAL_SIZE: int = TOTAL_FIELDS * 4  # 100 bytes (25 int32)
+    TOTAL_FIELDS: int = 31
+    TOTAL_SIZE: int = TOTAL_FIELDS * 4  # 124 bytes (31 int32)
 
 
 # Event name to code mapping
@@ -297,6 +305,15 @@ class SharedMemoryService(QObject):
                 # Write event code to shared memory (always, even if event doesn't change)
                 # This ensures events persist in shared memory until explicitly changed
                 self._write_int(self.layout.EVENT_CODE, event_code)
+                
+                # ML statistics for game HUD (only if segment is large enough, e.g. we created it)
+                if len(self.shm.buf) >= self.layout.TOTAL_SIZE:
+                    ml_conf = int(round(float(data.get("ml_confidence", 0)) * 1000))
+                    self._write_int(self.layout.ML_CONFIDENCE, max(0, min(1000, ml_conf)))
+                    probs = data.get("ml_probabilities") or {}
+                    for key, off in [("ml", self.layout.ML_PROB_ML), ("mr", self.layout.ML_PROB_MR),
+                                     ("mu", self.layout.ML_PROB_MU), ("md", self.layout.ML_PROB_MD), ("stop", self.layout.ML_PROB_STOP)]:
+                        self._write_int(off, max(0, min(1000, int(round(float(probs.get(key, 0)) * 1000)))))
                 
                 # Verify write by reading back (for debugging)
                 if event_code != 0 and self._event_log_counter % 60 == 0:  # Check every second at 60fps

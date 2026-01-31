@@ -92,7 +92,7 @@ class MLPredictorService:
             
             predicted_class = self.trainer.model.predict(X)[0]
             
-            # Check if model has predict_proba method
+            # Check if model has predict_proba method (needed for class_weights and confidence)
             if not hasattr(self.trainer.model, 'predict_proba'):
                 logger.warning("Model does not have predict_proba method - using default confidence")
                 # Apply ml/mr inversion if enabled
@@ -135,10 +135,18 @@ class MLPredictorService:
                 logger.error(f"Classes and probabilities length mismatch: {len(classes)} vs {len(probabilities)}")
                 return None
             
-            # Create probability dictionary
+            # Apply class_weights from game config (prediction_weights: ml, mr, mu, md)
+            class_weights = getattr(self.config, "class_weights", None) or {}
+            weighted_probs = np.array([
+                float(prob) * float(class_weights.get(str(cls), 1.0))
+                for cls, prob in zip(classes, probabilities)
+            ])
+            predicted_class = classes[int(np.argmax(weighted_probs))]
+            
+            # Create probability dictionary (raw probabilities for display)
             prob_dict = {str(cls): float(prob) for cls, prob in zip(classes, probabilities)}
             
-            # Get confidence (max probability)
+            # Get confidence (max raw probability for threshold comparison)
             confidence = float(max(probabilities))
             
             # Validate confidence

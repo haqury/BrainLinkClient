@@ -23,6 +23,14 @@ def main():
     
     logger.info("Starting BrainLink Client application")
     
+    # Parse --game-config so game can pass brainlink settings (confidence_threshold, prediction_weights, model_path)
+    game_config_path = None
+    argv = list(sys.argv)
+    for i, arg in enumerate(argv):
+        if arg == "--game-config" and i + 1 < len(argv):
+            game_config_path = argv[i + 1]
+            break
+    
     try:
         # Create Qt application
         app = QApplication(sys.argv)
@@ -34,8 +42,8 @@ def main():
         
         logger.info("Qt application initialized")
         
-        # Create and show main window
-        window = MainWindow()
+        # Create and show main window (pass game config path for brainlink ML settings)
+        window = MainWindow(game_config_path=game_config_path)
         window.show()
         
         logger.info("Main window created and shown")
