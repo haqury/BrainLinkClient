@@ -1,0 +1,9 @@
+# BrainLink Stack - Unified Integration Version
+# Используется для связки BrainLinkClient + get_level_of_monkey
+# Оба репозитория с этим тегом протестированы и совместимы друг с другом.
+
+integration-v1.0.0
+
+# Компоненты при этом теге:
+# - BrainLinkClient: v1.0.0
+# - get_level_of_monkey: v0.3.2
