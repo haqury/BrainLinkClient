@@ -821,11 +821,11 @@ class MLTrainerService(QObject):
         logger.info("Model training completed successfully")
         return metrics
     
-    def save_model(self):
-        """Save trained model to file"""
+    def save_model(self) -> bool:
+        """Save trained model to file. Returns True if saved, False if no model or error."""
         if self.model is None:
-            logger.warning("No model to save")
-            return
+            logger.warning("No model to save — train the model first")
+            return False
         
         try:
             path = Path(self.config.model_path)
@@ -835,9 +835,10 @@ class MLTrainerService(QObject):
                 pickle.dump(self.model, f)
             
             logger.info(f"Model saved to {path}")
-        
+            return True
         except Exception as e:
             logger.error(f"Error saving model: {e}", exc_info=True)
+            return False
     
     def load_model(self) -> bool:
         """

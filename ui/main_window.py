@@ -971,41 +971,58 @@ class MainWindow(QMainWindow):
     def on_shm_command_received(self, command: dict):
         """Handle command received from game client via shared memory"""
         try:
-            # Check if accepting commands is enabled
-            if not self.chk_accept_game_commands.isChecked():
-                logger.debug("Game commands ignored: 'Accept commands from games' is disabled")
-                return
-            
             command_type = command.get("type", 0)
             event_name = command.get("event", "")
-            
-            # Type 3: Save ML model to path from game config (no event needed)
+
+            # Type 3: Save ML model to path from game config — всегда обрабатываем (не зависит от "Accept commands")
             if command_type == 3:
-                if not getattr(self, '_game_config_path', None):
-                    logger.warning("Save model command ignored: no game config path (start BrainLink from game)")
-                    return
-                path = Path(self._game_config_path)
+                game_config_path = getattr(self, '_game_config_path', None)
+                # Если BrainLink запущен без --game-config, пробуем прочитать путь из файла (игра его записывает при "Save model")
+                if not game_config_path:
+                    import os
+                    fallback_dir = Path(os.environ.get("APPDATA", os.path.expanduser("~"))) / "BrainLink"
+                    fallback_file = fallback_dir / "game_config_path.txt"
+                    if fallback_file.exists():
+                        try:
+                            game_config_path = fallback_file.read_text(encoding="utf-8").strip()
+                            if game_config_path:
+                                logger.info("Using game config path from %s: %s", fallback_file, game_config_path)
+                        except Exception as e:
+                            logger.warning("Could not read game_config_path.txt: %s", e)
+                    if not game_config_path:
+                        logger.warning("Save model command ignored: no game config path (start BrainLink from game or save model from game first)")
+                        self.tray_icon.show_message("Save model", "Start BrainLink from game to save model.", QSystemTrayIcon.Warning)
+                        return
+                path = Path(game_config_path)
                 if not path.exists():
                     logger.warning("Save model command ignored: game config file not found: %s", path)
+                    self.tray_icon.show_message("Save model", "Game config file not found.", QSystemTrayIcon.Warning)
                     return
                 try:
                     with open(path, "r", encoding="utf-8") as f:
                         data = json.load(f)
                     bl = data.get("brainlink", {})
-                    model_path = (bl.get("model_path") or "").strip()
-                    if not model_path:
+                    model_path_raw = (bl.get("model_path") or "").strip()
+                    if not model_path_raw:
                         logger.warning("Save model command: brainlink.model_path is empty in game config")
+                        self.tray_icon.show_message("Save model", "Set model path in game settings first.", QSystemTrayIcon.Warning)
                         return
+                    # Абсолютный путь, чтобы сохранить в нужное место независимо от cwd
+                    model_path = str(Path(model_path_raw).resolve())
                     self.ml_trainer.config.model_path = model_path
-                    self.ml_trainer.save_model()
-                    logger.info("Saved ML model to %s (from game config)", model_path)
-                    self.tray_icon.show_message(
-                        "Model Saved",
-                        f"Model saved to: {model_path}",
-                        QSystemTrayIcon.Information
-                    )
+                    if self.ml_trainer.save_model():
+                        logger.info("Saved ML model to %s (from game config)", model_path)
+                        self.tray_icon.show_message("Model Saved", f"Model saved to: {model_path}", QSystemTrayIcon.Information)
+                    else:
+                        self.tray_icon.show_message("Save model", "No model to save. Train the model first (collect data and train).", QSystemTrayIcon.Warning)
                 except Exception as e:
                     logger.error("Failed to save model from game command: %s", e, exc_info=True)
+                    self.tray_icon.show_message("Save model", f"Error: {e}", QSystemTrayIcon.Critical)
+                return
+
+            # Остальные команды — только если включено "Accept commands from games"
+            if not self.chk_accept_game_commands.isChecked():
+                logger.debug("Game commands ignored: 'Accept commands from games' is disabled")
                 return
             
             if not event_name:
@@ -1338,10 +1355,11 @@ class MainWindow(QMainWindow):
                             if not event_name or event_name == "":
                                 logger.error(f"❌ ERROR: event_name is empty after assignment! prediction.predicted_event='{predicted_event_value}', type={type(predicted_event_value)}")
                         else:
-                            # ML prediction not confident - use empty event (NO rule-based fallback)
-                            logger.debug(f"ML prediction not confident: {prediction.confidence:.2f} < {confidence_threshold}, using empty event (rule-based disabled)")
-                            event_name = ""  # Empty event instead of rule-based
-                            event_source = "ml-prediction-failed"
+                            # ML prediction not confident - still send predicted event to game so it can use
+                            # min_confidence/full_confidence (limited speed); game scales speed by confidence
+                            event_name = prediction.predicted_event
+                            event_source = "ml-prediction-low-conf"
+                            logger.debug(f"ML prediction low confidence: {prediction.confidence:.2f} < {confidence_threshold}, sending event '{event_name}' for game speed scaling")
                     else:
                         # ML prediction returned None
                         logger.debug("ML prediction returned None, using empty event (rule-based disabled)")
