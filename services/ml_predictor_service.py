@@ -82,8 +82,12 @@ class MLPredictorService:
                 logger.warning(f"Invalid features detected: {features}")
                 return None
             
-            # Predict
-            X = np.array([features])
+            # Normalize with same scaler used at train time (if any)
+            scaler = getattr(self.trainer, 'scaler', None)
+            if scaler is not None:
+                X = scaler.transform(np.array([features], dtype=float))
+            else:
+                X = np.array([features])
             
             # Check if model has predict method
             if not hasattr(self.trainer.model, 'predict'):

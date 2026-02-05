@@ -25,6 +25,7 @@ import numpy as np
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.svm import SVC
 from sklearn.neural_network import MLPClassifier
+from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 
@@ -36,7 +37,7 @@ from models.event_types import EventType
 logger = logging.getLogger(__name__)
 
 
-def _train_model_in_process(training_data_json: str, config_dict: dict, result_queue: Queue):
+def _train_model_in_process(training_data_path: str, config_dict: dict, result_queue: Queue):
     """
     Train model in separate process (to avoid blocking UI)
     
@@ -46,8 +47,11 @@ def _train_model_in_process(training_data_json: str, config_dict: dict, result_q
     IMPORTANT: This function must NOT import or use any Qt/PyQt code,
     as it runs in a child process and would create a new Qt application.
     
+    Training data is read from a file to avoid Windows spawn pipe size limits
+    (passing large JSON via pickle causes EOFError: Ran out of input).
+    
     Args:
-        training_data_json: JSON string of training data
+        training_data_path: Path to JSON file with training data (list of dicts)
         config_dict: Configuration dictionary
         result_queue: Queue to send results back
     """
@@ -71,8 +75,13 @@ def _train_model_in_process(training_data_json: str, config_dict: dict, result_q
         from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
         from models.ml_models import MLTrainingData, MLConfig
         
-        # Parse training data
-        data_list = json.loads(training_data_json)
+        # Read training data from file (avoids pipe size limit on Windows spawn)
+        with open(training_data_path, 'r', encoding='utf-8') as f:
+            data_list = json.load(f)
+        try:
+            os.unlink(training_data_path)
+        except Exception:
+            pass
         training_data = []
         for item in data_list:
             sample = MLTrainingData(
@@ -100,6 +109,10 @@ def _train_model_in_process(training_data_json: str, config_dict: dict, result_q
         weight_vec = np.array([float(weights.get(name, 1.0)) for name in feature_names], dtype=float)
         X = np.array([sample.to_features() for sample in training_data], dtype=float) * weight_vec
         y = np.array([sample.event for sample in training_data])
+        
+        # Normalize features (improves SVM/neural_net and stabilizes RF)
+        from sklearn.preprocessing import StandardScaler
+        scaler = StandardScaler()
         
         # Decide how to split data based on dataset size / class counts.
         # sklearn's train_test_split with stratify requires at least 2 samples
@@ -140,18 +153,24 @@ def _train_model_in_process(training_data_json: str, config_dict: dict, result_q
                     X_train, y_train = X, y
                     X_test, y_test = X, y
         
-        # Create model
+        # Fit scaler on train only, transform both (avoids data leakage)
+        X_train = scaler.fit_transform(X_train)
+        X_test = scaler.transform(X_test)
+        
+        # Create model (class_weight='balanced' helps with imbalanced classes)
         if config.model_type == 'random_forest':
             model = RandomForestClassifier(
                 n_estimators=config.n_estimators,
                 max_depth=config.max_depth,
-                random_state=config.random_state
+                random_state=config.random_state,
+                class_weight='balanced'
             )
         elif config.model_type == 'svm':
             model = SVC(
                 kernel='rbf',
                 probability=True,
-                random_state=config.random_state
+                random_state=config.random_state,
+                class_weight='balanced'
             )
         elif config.model_type == 'neural_network':
             model = MLPClassifier(
@@ -178,7 +197,7 @@ def _train_model_in_process(training_data_json: str, config_dict: dict, result_q
         temp_file.close()
         
         with open(temp_path, 'wb') as f:
-            pickle.dump(model, f)
+            pickle.dump({'model': model, 'scaler': scaler}, f)
         
         # Calculate event distribution from training data
         event_distribution = {}
@@ -227,6 +246,7 @@ class MLTrainerService(QObject):
         super().__init__(parent)
         self.config = config or MLConfig()
         self.model = None
+        self.scaler = None  # StandardScaler for feature normalization (fit at train time)
         self.training_data: List[MLTrainingData] = []
         self.is_trained = False
         
@@ -236,6 +256,7 @@ class MLTrainerService(QObject):
         # Process management (using multiprocessing instead of threading)
         self._training_process: Optional[Process] = None
         self._result_queue: Optional[Queue] = None
+        self._training_data_path: Optional[str] = None  # temp file for training data (cleanup on spawn failure)
         self._training_lock = Lock()
         self._is_training = False
         
@@ -316,7 +337,8 @@ class MLTrainerService(QObject):
         with self._training_lock:
             training_data_copy = list(self.training_data)
         
-        # Convert training data to JSON
+        # Write training data to temp file (avoids Windows spawn pipe size limit)
+        import tempfile
         data_list = []
         for sample in training_data_copy:
             data_list.append({
@@ -333,8 +355,12 @@ class MLTrainerService(QObject):
                 'event': sample.event,
                 'timestamp': sample.timestamp.isoformat()
             })
-        
-        training_data_json = json.dumps(data_list)
+        tmp_data = tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.json', encoding='utf-8')
+        training_data_path = tmp_data.name
+        try:
+            json.dump(data_list, tmp_data, ensure_ascii=False)
+        finally:
+            tmp_data.close()
         
         # Convert config to dict
         config_dict = {
@@ -354,11 +380,12 @@ class MLTrainerService(QObject):
         # Create result queue
         self._result_queue = Queue()
         
-        # Create and start training process
+        # Create and start training process (pass file path, not large JSON)
         self._is_training = True
+        self._training_data_path = training_data_path
         self._training_process = Process(
             target=_train_model_in_process,
-            args=(training_data_json, config_dict, self._result_queue)
+            args=(training_data_path, config_dict, self._result_queue)
         )
         self._training_process.start()
         
@@ -425,14 +452,20 @@ class MLTrainerService(QObject):
                     
                     try:
                         with open(temp_model_path, 'rb') as f:
-                            self.model = pickle.load(f)
+                            obj = pickle.load(f)
+                        if isinstance(obj, dict):
+                            self.model = obj.get('model')
+                            self.scaler = obj.get('scaler')
+                        else:
+                            self.model = obj
+                            self.scaler = None  # legacy format
                         
                         # Move to final location
                         final_path = Path(self.config.model_path)
                         final_path.parent.mkdir(parents=True, exist_ok=True)
                         
                         with open(final_path, 'wb') as f:
-                            pickle.dump(self.model, f)
+                            pickle.dump({'model': self.model, 'scaler': self.scaler}, f)
                         
                         # Delete temp file
                         try:
@@ -465,6 +498,15 @@ class MLTrainerService(QObject):
     def _cleanup_process(self):
         """Cleanup training process"""
         self._is_training = False
+        
+        # Remove temp training data file if still present (worker deletes after read; if spawn failed it remains)
+        if getattr(self, '_training_data_path', None):
+            try:
+                if os.path.exists(self._training_data_path):
+                    os.unlink(self._training_data_path)
+            except Exception:
+                pass
+            self._training_data_path = None
         
         # Stop result timer
         if hasattr(self, '_result_timer'):
@@ -762,18 +804,26 @@ class MLTrainerService(QObject):
                     X_train, y_train = X, y
                     X_test, y_test = X, y
         
-        # Create model
+        # Normalize features (improves prediction stability)
+        scaler = StandardScaler()
+        X_train = scaler.fit_transform(X_train)
+        X_test = scaler.transform(X_test)
+        self.scaler = scaler
+        
+        # Create model (class_weight='balanced' for imbalanced classes)
         if self.config.model_type == 'random_forest':
             self.model = RandomForestClassifier(
                 n_estimators=self.config.n_estimators,
                 max_depth=self.config.max_depth,
-                random_state=self.config.random_state
+                random_state=self.config.random_state,
+                class_weight='balanced'
             )
         elif self.config.model_type == 'svm':
             self.model = SVC(
                 kernel='rbf',
                 probability=True,
-                random_state=self.config.random_state
+                random_state=self.config.random_state,
+                class_weight='balanced'
             )
         elif self.config.model_type == 'neural_network':
             self.model = MLPClassifier(
@@ -832,7 +882,7 @@ class MLTrainerService(QObject):
             path.parent.mkdir(parents=True, exist_ok=True)
             
             with open(path, 'wb') as f:
-                pickle.dump(self.model, f)
+                pickle.dump({'model': self.model, 'scaler': getattr(self, 'scaler', None)}, f)
             
             logger.info(f"Model saved to {path}")
             return True
@@ -854,7 +904,13 @@ class MLTrainerService(QObject):
                 return False
             
             with open(path, 'rb') as f:
-                self.model = pickle.load(f)
+                obj = pickle.load(f)
+            if isinstance(obj, dict):
+                self.model = obj.get('model')
+                self.scaler = obj.get('scaler')
+            else:
+                self.model = obj
+                self.scaler = None  # legacy format
             
             # Validate loaded model
             if self.model is None:

@@ -1031,105 +1031,86 @@ class MainWindow(QMainWindow):
             
             logger.info(f"Processing command from game: type={command_type}, event={event_name}")
             
-            # Type 1: Save event to history
+            # Type 1: Save event to history (only when we have EEG data from device — no zero-only records)
             if command_type == 1:
-                # Check if auto-save to history is enabled
                 if not self.chk_auto_save_history.isChecked():
                     logger.debug(f"History save skipped: 'Auto-save to history' is disabled for event '{event_name}'")
                     return
-                # Get current EEG data from device
-                if hasattr(self, 'device') and self.device and hasattr(self.device, 'model'):
-                    model = self.device.model
-                    
-                    # Create history record with event
-                    from models.eeg_models import EegHistoryModel
-                    h = EegHistoryModel(
-                        attention=model.attention,
-                        meditation=model.meditation,
-                        delta=model.delta,
-                        theta=model.theta,
-                        low_alpha=model.low_alpha,
-                        high_alpha=model.high_alpha,
-                        low_beta=model.low_beta,
-                        high_beta=model.high_beta,
-                        low_gamma=model.low_gamma,
-                        high_gamma=model.high_gamma,
-                        event_name=event_name
-                    )
-                    
-                    self.history_service.add(h)
-                    self.update_counter()
-                    logger.info(f"Saved event '{event_name}' to history from game")
-                    
-                    # Update status in tray
-                    self.tray_icon.show_message(
-                        "Event Saved",
-                        f"Game saved event: {event_name}",
-                        QSystemTrayIcon.Information
-                    )
-                else:
-                    logger.warning("No active device, cannot save event with current EEG data")
+                model = getattr(self, '_last_eeg_model', None)
+                if not model:
+                    logger.warning("No EEG data received yet (device not connected or no data), cannot save event")
+                    return
+                from models.eeg_models import EegHistoryModel
+                h = EegHistoryModel(
+                    attention=model.attention,
+                    meditation=model.meditation,
+                    delta=model.delta,
+                    theta=model.theta,
+                    low_alpha=model.low_alpha,
+                    high_alpha=model.high_alpha,
+                    low_beta=model.low_beta,
+                    high_beta=model.high_beta,
+                    low_gamma=model.low_gamma,
+                    high_gamma=model.high_gamma,
+                    event_name=event_name
+                )
+                self.history_service.add(h)
+                self.update_counter()
+                logger.info(f"Saved event '{event_name}' to history from game")
+                self.tray_icon.show_message(
+                    "Event Saved",
+                    f"Game saved event: {event_name}",
+                    QSystemTrayIcon.Information
+                )
             
-            # Type 2: Save for ML training
+            # Type 2: Save for ML training (only when we have EEG data from device — no zero-only)
             elif command_type == 2:
-                # Check if auto-save for ML is enabled
                 if not self.chk_auto_save_ml.isChecked():
                     logger.debug(f"ML training save skipped: 'Auto-save for ML training' is disabled for event '{event_name}'")
                     return
-                
-                # Get current EEG data
-                if hasattr(self, 'device') and self.device and hasattr(self.device, 'model'):
-                    model = self.device.model
-                    
-                    # Create training sample
-                    from models.ml_models import MLTrainingData
-                    training_sample = MLTrainingData(
-                        attention=model.attention,
-                        meditation=model.meditation,
-                        delta=model.delta,
-                        theta=model.theta,
-                        low_alpha=model.low_alpha,
-                        high_alpha=model.high_alpha,
-                        low_beta=model.low_beta,
-                        high_beta=model.high_beta,
-                        low_gamma=model.low_gamma,
-                        high_gamma=model.high_gamma,
-                        event=event_name
-                    )
-                    
-                    self.ml_trainer.add_training_sample(training_sample)
-                    logger.info(f"Added ML training sample '{event_name}' from game")
-                    
-                    # Update ML Control form if it's open
-                    if self.ml_control_form and self.ml_control_form.isVisible():
-                        self.ml_control_form.update_status()
-                    
-                    # Auto-training will be triggered automatically if enabled
-                    
-                    # Also save to history
-                    h = EegHistoryModel(
-                        attention=model.attention,
-                        meditation=model.meditation,
-                        delta=model.delta,
-                        theta=model.theta,
-                        low_alpha=model.low_alpha,
-                        high_alpha=model.high_alpha,
-                        low_beta=model.low_beta,
-                        high_beta=model.high_beta,
-                        low_gamma=model.low_gamma,
-                        high_gamma=model.high_gamma,
-                        event_name=event_name
-                    )
-                    self.history_service.add(h)
-                    self.update_counter()
-                    
-                    self.tray_icon.show_message(
-                        "ML Training Data",
-                        f"Game added training sample: {event_name}",
-                        QSystemTrayIcon.Information
-                    )
-                else:
-                    logger.warning("No active device, cannot save ML training data")
+                model = getattr(self, '_last_eeg_model', None)
+                if not model:
+                    logger.warning("No EEG data received yet (device not connected or no data), cannot save ML training data")
+                    return
+                from models.ml_models import MLTrainingData
+                training_sample = MLTrainingData(
+                    attention=model.attention,
+                    meditation=model.meditation,
+                    delta=model.delta,
+                    theta=model.theta,
+                    low_alpha=model.low_alpha,
+                    high_alpha=model.high_alpha,
+                    low_beta=model.low_beta,
+                    high_beta=model.high_beta,
+                    low_gamma=model.low_gamma,
+                    high_gamma=model.high_gamma,
+                    event=event_name
+                )
+                self.ml_trainer.add_training_sample(training_sample)
+                logger.info(f"Added ML training sample '{event_name}' from game")
+                if self.ml_control_form and self.ml_control_form.isVisible():
+                    self.ml_control_form.update_status()
+                from models.eeg_models import EegHistoryModel
+                h = EegHistoryModel(
+                    attention=model.attention,
+                    meditation=model.meditation,
+                    delta=model.delta,
+                    theta=model.theta,
+                    low_alpha=model.low_alpha,
+                    high_alpha=model.high_alpha,
+                    low_beta=model.low_beta,
+                    high_beta=model.high_beta,
+                    low_gamma=model.low_gamma,
+                    high_gamma=model.high_gamma,
+                    event_name=event_name
+                )
+                self.history_service.add(h)
+                self.update_counter()
+                self.tray_icon.show_message(
+                    "ML Training Data",
+                    f"Game added training sample: {event_name}",
+                    QSystemTrayIcon.Information
+                )
             
             else:
                 logger.warning(f"Unknown command type: {command_type}")
@@ -1280,6 +1261,7 @@ class MainWindow(QMainWindow):
         self._is_connected = False
         self._connection_thread = None
         self._connection_loop = None
+        self._last_eeg_model = None  # Clear so game commands don't use stale EEG
         
         # Update tray status
         self.tray_icon.update_status(connected=False)
@@ -1320,6 +1302,8 @@ class MainWindow(QMainWindow):
 
     def on_eeg_data_updated(self, model: BrainLinkModel):
         """Handle EEG data in main thread"""
+        # Keep latest EEG snapshot for game commands (device is not stored on self)
+        self._last_eeg_model = model
         # Get ground-truth label from rule-based / manual selection
         # (used for training data collection).
         label_event_name = self.get_event_name()
