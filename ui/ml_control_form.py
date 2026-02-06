@@ -254,15 +254,15 @@ class MLControlForm(QDialog):
             self.lbl_model_status.setStyleSheet("color: green; font-size: 11pt; font-weight: bold;")
             self.chk_use_ml.setEnabled(True)
             self.btn_save_model.setEnabled(True)
-            # Sync with main window checkbox if exists
             if hasattr(self.parent_window, 'chk_use_ml_prediction'):
                 self.chk_use_ml.setChecked(self.parent_window.chk_use_ml_prediction.isChecked())
         else:
             self.lbl_model_status.setText("Model: ✗ Not trained")
             self.lbl_model_status.setStyleSheet("color: red; font-size: 11pt;")
-            self.chk_use_ml.setEnabled(False)
-            self.chk_use_ml.setChecked(False)
+            self.chk_use_ml.setEnabled(True)  # Keep enabled; do not uncheck when no model
             self.btn_save_model.setEnabled(False)
+            if hasattr(self.parent_window, 'chk_use_ml_prediction'):
+                self.chk_use_ml.setChecked(self.parent_window.chk_use_ml_prediction.isChecked())
         
         # Show data stored in the trained model (if model is trained)
         if self.ml_trainer.is_trained and self.ml_trainer.model:
@@ -479,58 +479,11 @@ class MLControlForm(QDialog):
         self.btn_train.setEnabled(True)
     
     def on_use_ml_changed(self, state):
-        """Handle use ML prediction checkbox"""
+        """Handle use ML prediction checkbox (never auto-uncheck; no errors if model missing)."""
         if self.parent_window:
             enabled = (state == Qt.Checked)
-            
-            if enabled:
-                # Verify model is ready before enabling
-                if not self.ml_predictor.is_ready():
-                    QMessageBox.warning(
-                        self,
-                        "Model Not Ready",
-                        "Cannot enable ML prediction:\n"
-                        "Model is not trained or not loaded.\n\n"
-                        "Please train the model first."
-                    )
-                    # Uncheck the checkbox
-                    self.chk_use_ml.blockSignals(True)
-                    self.chk_use_ml.setChecked(False)
-                    self.chk_use_ml.blockSignals(False)
-                    return
-                
-                # Test prediction with dummy data to ensure it works
-                try:
-                    from pybrainlink import BrainLinkModel
-                    test_model = BrainLinkModel(
-                        attention=50, meditation=50, signal=0,
-                        delta=100000, theta=80000, low_alpha=40000,
-                        high_alpha=30000, low_beta=20000, high_beta=15000,
-                        low_gamma=10000, high_gamma=8000
-                    )
-                    test_prediction = self.ml_predictor.predict(test_model)
-                    if test_prediction is None:
-                        raise ValueError("Test prediction returned None")
-                    logger.info("ML prediction test successful")
-                except Exception as e:
-                    logger.error(f"ML prediction test failed: {e}", exc_info=True)
-                    QMessageBox.warning(
-                        self,
-                        "Model Error",
-                        f"Cannot enable ML prediction:\n"
-                        f"Model test failed: {e}\n\n"
-                        f"Please retrain the model."
-                    )
-                    # Uncheck the checkbox
-                    self.chk_use_ml.blockSignals(True)
-                    self.chk_use_ml.setChecked(False)
-                    self.chk_use_ml.blockSignals(False)
-                    return
-            
             self.parent_window._use_ml_prediction = enabled
             logger.info(f"ML prediction: {'enabled' if enabled else 'disabled'}")
-            
-            # Update main window checkbox if exists
             if hasattr(self.parent_window, 'chk_use_ml_prediction'):
                 self.parent_window.chk_use_ml_prediction.blockSignals(True)
                 self.parent_window.chk_use_ml_prediction.setChecked(enabled)

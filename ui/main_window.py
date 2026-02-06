@@ -647,55 +647,18 @@ class MainWindow(QMainWindow):
         self._minimize_to_tray = (state == Qt.Checked)
     
     def on_use_ml_prediction_changed(self, state):
-        """Handle use ML prediction checkbox state change"""
+        """Handle use ML prediction checkbox state change (checkbox is never auto-unchecked; no errors if model missing)."""
         enabled = state == Qt.Checked
-        
-        if enabled:
-            # Check if ML model is ready
-            if not self.ml_predictor.is_ready():
-                QMessageBox.warning(
-                    self,
-                    "ML Model Not Ready",
-                    "ML model is not trained yet.\n\n"
-                    "Please train a model first using 'ML Control' button."
-                )
-                self.chk_use_ml_prediction.blockSignals(True)
-                self.chk_use_ml_prediction.setChecked(False)
-                self.chk_use_ml_prediction.blockSignals(False)
-                return
-            
-            # Test prediction
-            try:
-                from pybrainlink import BrainLinkModel
-                test_model = BrainLinkModel()
-                test_prediction = self.ml_predictor.predict(test_model)
-                if test_prediction is None:
-                    raise ValueError("Test prediction returned None")
-            except Exception as e:
-                logger.error(f"ML prediction test failed: {e}", exc_info=True)
-                QMessageBox.warning(
-                    self,
-                    "ML Prediction Error",
-                    f"Cannot enable ML prediction:\n{str(e)}\n\n"
-                    "Please check ML model in 'ML Control' window."
-                )
-                self.chk_use_ml_prediction.blockSignals(True)
-                self.chk_use_ml_prediction.setChecked(False)
-                self.chk_use_ml_prediction.blockSignals(False)
-                return
-        
         self._use_ml_prediction = enabled
         logger.info(f"ML prediction: {'enabled' if enabled else 'disabled'}")
-        
-        # Update ML control form if open
+        # Sync ML control form if open
         if hasattr(self, 'ml_control_form') and self.ml_control_form:
             try:
                 self.ml_control_form.chk_use_ml.blockSignals(True)
                 self.ml_control_form.chk_use_ml.setChecked(enabled)
                 self.ml_control_form.chk_use_ml.blockSignals(False)
-            except:
+            except Exception:
                 pass
-        logger.info(f"Minimize to tray: {'enabled' if self._minimize_to_tray else 'disabled'}")
 
     # ==================== History path persistence ====================
     def _load_history_path(self) -> str:
@@ -932,14 +895,9 @@ class MainWindow(QMainWindow):
             except:
                 pass
         
-        # Update ML prediction checkbox state
+        # Keep ML prediction checkbox always enabled; do not uncheck when model has no data
         if hasattr(self, 'chk_use_ml_prediction'):
-            if self.ml_predictor.is_ready():
-                self.chk_use_ml_prediction.setEnabled(True)
-            else:
-                self.chk_use_ml_prediction.setEnabled(False)
-                if self.chk_use_ml_prediction.isChecked():
-                    self.chk_use_ml_prediction.setChecked(False)
+            self.chk_use_ml_prediction.setEnabled(True)
     
     def on_auto_training_failed(self, error_msg: str):
         """Handle auto-training failed signal"""
@@ -957,14 +915,9 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'ml_predictor'):
             try:
                 self.ml_predictor.load_model()
-                # Update checkbox state if model is now ready
+                # Keep checkbox enabled; do not uncheck when model has no data
                 if hasattr(self, 'chk_use_ml_prediction'):
-                    if self.ml_predictor.is_ready():
-                        self.chk_use_ml_prediction.setEnabled(True)
-                    else:
-                        self.chk_use_ml_prediction.setEnabled(False)
-                        if self.chk_use_ml_prediction.isChecked():
-                            self.chk_use_ml_prediction.setChecked(False)
+                    self.chk_use_ml_prediction.setEnabled(True)
             except:
                 pass
     
@@ -1031,10 +984,13 @@ class MainWindow(QMainWindow):
             
             logger.info(f"Processing command from game: type={command_type}, event={event_name}")
             
-            # Type 1: Save event to history (only when we have EEG data from device — no zero-only records)
+            # Type 1: Save event to history (only when we have EEG data; skip when ML on — game may echo our prediction)
             if command_type == 1:
                 if not self.chk_auto_save_history.isChecked():
                     logger.debug(f"History save skipped: 'Auto-save to history' is disabled for event '{event_name}'")
+                    return
+                if self._use_ml_prediction:
+                    logger.debug("History save skipped from game: ML prediction is on (event may be our prediction)")
                     return
                 model = getattr(self, '_last_eeg_model', None)
                 if not model:
@@ -1090,22 +1046,24 @@ class MainWindow(QMainWindow):
                 logger.info(f"Added ML training sample '{event_name}' from game")
                 if self.ml_control_form and self.ml_control_form.isVisible():
                     self.ml_control_form.update_status()
-                from models.eeg_models import EegHistoryModel
-                h = EegHistoryModel(
-                    attention=model.attention,
-                    meditation=model.meditation,
-                    delta=model.delta,
-                    theta=model.theta,
-                    low_alpha=model.low_alpha,
-                    high_alpha=model.high_alpha,
-                    low_beta=model.low_beta,
-                    high_beta=model.high_beta,
-                    low_gamma=model.low_gamma,
-                    high_gamma=model.high_gamma,
-                    event_name=event_name
-                )
-                self.history_service.add(h)
-                self.update_counter()
+                # Add to history only when ML prediction is off (otherwise game event may be our prediction)
+                if not self._use_ml_prediction:
+                    from models.eeg_models import EegHistoryModel
+                    h = EegHistoryModel(
+                        attention=model.attention,
+                        meditation=model.meditation,
+                        delta=model.delta,
+                        theta=model.theta,
+                        low_alpha=model.low_alpha,
+                        high_alpha=model.high_alpha,
+                        low_beta=model.low_beta,
+                        high_beta=model.high_beta,
+                        low_gamma=model.low_gamma,
+                        high_gamma=model.high_gamma,
+                        event_name=event_name
+                    )
+                    self.history_service.add(h)
+                    self.update_counter()
                 self.tray_icon.show_message(
                     "ML Training Data",
                     f"Game added training sample: {event_name}",
@@ -1372,7 +1330,7 @@ class MainWindow(QMainWindow):
         if self._event_name_log_counter % 100 == 0:  # Log every 100 updates
             logger.info(f"🔍 After ML/rule logic: event_name='{event_name}', event_source='{event_source}', type(event_name)={type(event_name)}")
         
-        # Create history record
+        # History record uses only ground truth (label), not ML prediction — so history is not polluted by predictions
         h = EegHistoryModel(
             attention=model.attention,
             meditation=model.meditation,
@@ -1384,16 +1342,13 @@ class MainWindow(QMainWindow):
             high_beta=model.high_beta,
             low_gamma=model.low_gamma,
             high_gamma=model.high_gamma,
-            event_name=event_name
+            event_name=label_event_name
         )
         
-        # Process mouse control
-        # Only process if we have a valid event name
-        # IMPORTANT: Don't overwrite event_name if it was set by ML prediction!
+        # Process mouse control (use event_name = ML prediction or rule-based for actual control)
         if self.cb_autouse.isChecked():
-            # Use event from current selection or ML prediction
-            if h.event_name and h.event_name != EventType.STOP.value:
-                self.mouse_service.play(h, self.config, h.event_name, self.cb_use_key.isChecked())
+            if event_name and event_name != EventType.STOP.value:
+                self.mouse_service.play(h, self.config, event_name, self.cb_use_key.isChecked())
             else:
                 # No valid event - stop movement
                 self.mouse_service.stop()
@@ -1421,8 +1376,8 @@ class MainWindow(QMainWindow):
         if self.eeg_data_form and self.eeg_data_form.isVisible():
             self.eeg_data_form.update_data(model)
         
-        # Add to history if event is set
-        if h.event_name:
+        # Add to history only when ML prediction is off (otherwise we'd save predictions)
+        if h.event_name and not self._use_ml_prediction:
             self.history_service.add(h)
         
         # Collect training data if in training mode.

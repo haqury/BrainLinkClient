@@ -267,7 +267,7 @@ class MLTrainerService(QObject):
         
         # Auto-training settings
         self.auto_train_enabled = getattr(self.config, 'auto_train_enabled', True)
-        self.auto_train_min_new_samples = getattr(self.config, 'auto_train_min_new_samples', 5)
+        self.auto_train_min_new_samples = getattr(self.config, 'auto_train_min_new_samples', 4)
         self._samples_since_last_train = 0
         
         # NOTE:

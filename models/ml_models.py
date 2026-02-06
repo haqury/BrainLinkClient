@@ -69,14 +69,14 @@ class MLConfig:
     
     # Training settings
     test_size: float = 0.2
-    min_samples_per_class: int = 10
+    min_samples_per_class: int = 4
     # Allow training even on a single class (e.g. only 'stop').
     # As новые классы появляются в данных, авто‑тренировка переобучит модель.
     min_classes_required: int = 1
     
     # Auto-training settings
     auto_train_enabled: bool = True  # Enable automatic training when new samples added
-    auto_train_min_new_samples: int = 5  # Minimum new samples before auto-training
+    auto_train_min_new_samples: int = 4  # Minimum new samples before auto-training (retrain every 4 events)
     
     # Prediction settings
     confidence_threshold: float = 0.6  # Minimum confidence for prediction
