@@ -18,6 +18,7 @@ CODE_TO_EVENT = {
     3: "mu",    # Move Up
     4: "md",    # Move Down
     5: "stop",  # Stop
+    6: "ne",    # Neutral / action interrupted
 }
 
 
@@ -197,7 +198,7 @@ class BrainLinkSharedMemoryClient:
             import time
             
             # Convert event name to code (or use 0 for custom events)
-            event_codes = {"ml": 1, "mr": 2, "mu": 3, "md": 4, "stop": 5}
+            event_codes = {"ml": 1, "mr": 2, "mu": 3, "md": 4, "stop": 5, "ne": 6}
             event_code = event_codes.get(event_name, 0)
             
             # Write command
@@ -231,7 +232,7 @@ class BrainLinkSharedMemoryClient:
             import time
             
             # Convert event name to code
-            event_codes = {"ml": 1, "mr": 2, "mu": 3, "md": 4, "stop": 5}
+            event_codes = {"ml": 1, "mr": 2, "mu": 3, "md": 4, "stop": 5, "ne": 6}
             event_code = event_codes.get(event_name, 0)
             
             if event_code == 0:

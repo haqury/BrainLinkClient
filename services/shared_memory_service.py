@@ -73,6 +73,7 @@ EVENT_TO_CODE = {
     "mu": 3,  # Move Up
     "md": 4,  # Move Down
     "stop": 5,
+    "ne": 6,  # Neutral / action interrupted (from game)
 }
 
 CODE_TO_EVENT = {v: k for k, v in EVENT_TO_CODE.items()}

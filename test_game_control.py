@@ -15,6 +15,7 @@ CODE_TO_EVENT = {
     3: "mu",    # Move Up
     4: "md",    # Move Down
     5: "stop",  # Stop
+    6: "ne",    # Neutral / action interrupted
 }
 
 EVENT_CODE_OFFSET = 13  # Must match SharedMemoryLayout.EVENT_CODE

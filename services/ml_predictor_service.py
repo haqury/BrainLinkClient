@@ -1,6 +1,7 @@
 """ML Prediction Service for real-time EEG event detection"""
 
 import logging
+from collections import Counter, deque
 from typing import Optional
 import numpy as np
 
@@ -23,6 +24,8 @@ class MLPredictorService:
         """
         self.trainer = trainer or MLTrainerService()
         self.config = self.trainer.config
+        # Vote buffer: last N predicted_event strings; cleared on game command (segment boundary)
+        self._vote_buffer = deque(maxlen=32)
         
         # Try to load existing model
         if not self.trainer.is_trained:
@@ -48,6 +51,29 @@ class MLPredictorService:
                 self.trainer.model = None
         
         logger.info(f"MLPredictorService initialized (model trained: {self.trainer.is_trained}, model ready: {self.is_ready()})")
+    
+    def reset_vote_buffer(self):
+        """Clear vote buffer (call on game Type 1/2 command so segments do not mix)."""
+        self._vote_buffer.clear()
+    
+    def _apply_vote(self, prediction: MLPrediction) -> MLPrediction:
+        """If vote_window_size > 1, push to buffer and return MLPrediction with majority vote (tie-break: last)."""
+        n = getattr(self.config, "vote_window_size", 1)
+        if n <= 1:
+            return prediction
+        self._vote_buffer.append(prediction.predicted_event)
+        buf = list(self._vote_buffer)[-n:]
+        if not buf:
+            return prediction
+        counts = Counter(buf)
+        max_count = max(counts.values())
+        winners = [e for e, c in counts.items() if c == max_count]
+        voted_event = buf[-1] if len(winners) > 1 else winners[0]
+        return MLPrediction(
+            predicted_event=voted_event,
+            confidence=prediction.confidence,
+            probabilities=prediction.probabilities or {}
+        )
     
     def predict(self, eeg_data: BrainLinkModel) -> Optional[MLPrediction]:
         """
@@ -108,12 +134,12 @@ class MLPredictorService:
                     elif final_event == "mr":
                         final_event = "ml"
                         logger.debug(f"Inverted mr -> ml")
-                # Return prediction with default confidence
-                return MLPrediction(
+                # Return prediction with default confidence (and optional vote)
+                return self._apply_vote(MLPrediction(
                     predicted_event=final_event,
                     confidence=1.0,
                     probabilities={final_event: 1.0}
-                )
+                ))
             
             probabilities = self.trainer.model.predict_proba(X)[0]
             
@@ -176,7 +202,7 @@ class MLPredictorService:
             
             logger.debug(f"ML Prediction: {predicted_class} -> {final_event} (confidence: {confidence:.2f}, probabilities: {prob_dict})")
             
-            return prediction
+            return self._apply_vote(prediction)
         
         except AttributeError as e:
             logger.error(f"Attribute error during prediction: {e}", exc_info=True)

@@ -41,8 +41,8 @@ class MouseService:
             self._timer.cancel()
             self._timer = None
 
-        # Clear current event if no event or stop event
-        if not event_name or event_name == EventType.STOP.value:
+        # Clear current event if no event, stop, or neutral (action interrupted)
+        if not event_name or event_name == EventType.STOP.value or event_name == EventType.NEUTRAL.value:
             self._stop_flag = True
             self._current_event = ""
             return

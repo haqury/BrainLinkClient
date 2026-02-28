@@ -175,9 +175,14 @@ class MainWindow(QMainWindow):
                     "mu": float(weights[2]),
                     "md": float(weights[3]),
                     "stop": float(weights[4]) if len(weights) > 4 else 1.0,
+                    "ne": float(weights[5]) if len(weights) > 5 else 1.0,
                 }
-            logger.info("ML config loaded from game config: threshold=%.2f, model_path=%s, class_weights=%s",
-                        config.confidence_threshold, config.model_path, config.class_weights)
+            if "vote_window_size" in bl:
+                v = int(bl["vote_window_size"])
+                if 1 <= v <= 32:
+                    config.vote_window_size = v
+            logger.info("ML config loaded from game config: threshold=%.2f, model_path=%s, class_weights=%s, vote_window_size=%s",
+                        config.confidence_threshold, config.model_path, config.class_weights, config.vote_window_size)
         except Exception as e:
             logger.warning("Failed to load game config for ML: %s", e)
         return config
@@ -877,14 +882,16 @@ class MainWindow(QMainWindow):
     
     def on_auto_training_completed(self, metrics: dict):
         """Handle auto-training completed signal"""
-        accuracy = metrics.get('test_accuracy', 0)
+        # Use report_accuracy when test set was too small (avoids misleading 0% with 7 samples)
+        accuracy = metrics.get('report_accuracy', metrics.get('test_accuracy', 0))
+        accuracy_note = metrics.get('accuracy_note', '')
         n_samples = metrics.get('n_samples', 0)
         
         logger.info(f"✅ Auto-training completed: accuracy={accuracy:.3f}, samples={n_samples}")
         
         self.tray_icon.show_message(
             "ML Training Complete",
-            f"Model retrained successfully!\nAccuracy: {accuracy:.1%}\nSamples: {n_samples}",
+            f"Model retrained successfully!\nAccuracy: {accuracy:.1%}{accuracy_note}\nSamples: {n_samples}",
             QSystemTrayIcon.Information
         )
         
@@ -983,6 +990,15 @@ class MainWindow(QMainWindow):
                 return
             
             logger.info(f"Processing command from game: type={command_type}, event={event_name}")
+            
+            # Segment boundary: reset vote buffer on Type 1/2 so snapshots do not mix with "between keypresses"
+            if command_type in (1, 2) and hasattr(self, 'ml_predictor') and hasattr(self.ml_predictor, 'reset_vote_buffer'):
+                self.ml_predictor.reset_vote_buffer()
+            
+            # "ne" = action interrupted / absence of action — only used to reset vote buffer and stop movement; do not save to history or ML
+            if event_name == EventType.NEUTRAL.value:
+                logger.debug("Action interrupted (ne): vote buffer reset; not saving to history or ML")
+                return
             
             # Type 1: Save event to history (only when we have EEG data; skip when ML on — game may echo our prediction)
             if command_type == 1:
@@ -1346,18 +1362,20 @@ class MainWindow(QMainWindow):
         )
         
         # Process mouse control (use event_name = ML prediction or rule-based for actual control)
+        # "ne" (neutral) = action interrupted — treat like stop
+        stop_events = (EventType.STOP.value, EventType.NEUTRAL.value)
         if self.cb_autouse.isChecked():
-            if event_name and event_name != EventType.STOP.value:
+            if event_name and event_name not in stop_events:
                 self.mouse_service.play(h, self.config, event_name, self.cb_use_key.isChecked())
             else:
-                # No valid event - stop movement
+                # No valid event or stop/ne - stop movement
                 self.mouse_service.stop()
         else:
             # Use history-based detection ONLY if ML didn't set event_name
             # If ML is enabled and set event_name, don't overwrite it with rule-based!
             if self._use_ml_prediction and event_source.startswith("ml-") and event_name:
                 # ML already set event_name - use it, don't overwrite with rule-based
-                if event_name and event_name != EventType.STOP.value:
+                if event_name and event_name not in stop_events:
                     self.mouse_service.play(h, self.config, event_name, self.cb_use_key.isChecked())
                 else:
                     self.mouse_service.stop()
@@ -1365,7 +1383,7 @@ class MainWindow(QMainWindow):
                 # ML not enabled or didn't set event - use history-based detection
                 history_event_name = self.history_service.get_event_name_by(h, self.config)
                 # Only play if event_name is not empty and not stop
-                if history_event_name and history_event_name != EventType.STOP.value:
+                if history_event_name and history_event_name not in stop_events:
                     self.mouse_service.play(h, self.config, history_event_name, self.cb_use_key.isChecked())
                 else:
                     # No event detected - stop movement

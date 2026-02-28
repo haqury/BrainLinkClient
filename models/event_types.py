@@ -11,6 +11,7 @@ class EventType(str, Enum):
     MOVE_UP = "mu"
     MOVE_DOWN = "md"
     STOP = "stop"
+    NEUTRAL = "ne"  # Action interrupted / no intent (from game)
     
     def __str__(self) -> str:
         """Return the event value as string"""

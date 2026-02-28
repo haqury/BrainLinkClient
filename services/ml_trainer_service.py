@@ -190,7 +190,10 @@ def _train_model_in_process(training_data_path: str, config_dict: dict, result_q
         
         train_accuracy = accuracy_score(y_train, y_pred_train)
         test_accuracy = accuracy_score(y_test, y_pred_test)
-        
+        min_test_for_report = 3
+        report_accuracy = test_accuracy if len(y_test) >= min_test_for_report else train_accuracy
+        accuracy_note = "" if len(y_test) >= min_test_for_report else " (train; test set too small)"
+
         # Save model to temporary file
         temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.pkl')
         temp_path = temp_file.name
@@ -209,6 +212,8 @@ def _train_model_in_process(training_data_path: str, config_dict: dict, result_q
         metrics = {
             'train_accuracy': train_accuracy,
             'test_accuracy': test_accuracy,
+            'report_accuracy': report_accuracy,
+            'accuracy_note': accuracy_note,
             'n_samples': len(training_data),
             'n_features': X.shape[1],
             'model_type': config.model_type,
@@ -404,7 +409,7 @@ class MLTrainerService(QObject):
     
     def _on_training_completed(self, metrics: dict):
         """Handle training completed signal"""
-        logger.info(f"Background training completed: accuracy={metrics.get('test_accuracy', 0):.3f}")
+        logger.info(f"Background training completed: accuracy={metrics.get('report_accuracy', metrics.get('test_accuracy', 0)):.3f}")
         self._samples_since_last_train = 0  # Reset counter
         self.auto_training_completed.emit(metrics)
         self.model_updated.emit()
@@ -853,11 +858,19 @@ class MLTrainerService(QObject):
             self.save_model()
             self.is_trained = True
         
+        # For very small test sets (e.g. 1–2 samples), test accuracy is 0% or 100% and misleading
+        min_test_for_report = 3
+        report_accuracy = test_accuracy if len(y_test) >= min_test_for_report else train_accuracy
+        accuracy_note = "" if len(y_test) >= min_test_for_report else " (train; test set too small)"
+
         # Return metrics
         metrics = {
             'train_accuracy': train_accuracy,
             'test_accuracy': test_accuracy,
+            'report_accuracy': report_accuracy,
+            'accuracy_note': accuracy_note,
             'n_samples': len(training_data_copy),  # Use copy to avoid lock issues
+            'n_test': len(y_test),
             'n_features': X.shape[1],
             'model_type': self.config.model_type,
             'classification_report': classification_report(y_test, y_pred_test),

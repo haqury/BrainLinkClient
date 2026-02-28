@@ -80,11 +80,12 @@ class MLConfig:
     
     # Prediction settings
     confidence_threshold: float = 0.6  # Minimum confidence for prediction
+    vote_window_size: int = 4  # Number of last predictions for majority vote (1 = no voting, 2–N = vote)
     invert_ml_mr: bool = False  # Invert ml/mr predictions (fix if model predicts backwards)
 
-    # Class weights for prediction (ml, mr, mu, md, stop) - from game config prediction_weights
+    # Class weights for prediction (ml, mr, mu, md, stop, ne) - from game config prediction_weights
     class_weights: Dict[str, float] = field(default_factory=lambda: {
-        "ml": 1.0, "mr": 1.0, "mu": 1.0, "md": 1.0, "stop": 1.0
+        "ml": 1.0, "mr": 1.0, "mu": 1.0, "md": 1.0, "stop": 1.0, "ne": 1.0
     })
 
     # Feature weighting:
@@ -127,6 +128,8 @@ class MLConfig:
         
         if self.min_samples_per_class < 1:
             raise ValueError(f"min_samples_per_class must be >= 1, got {self.min_samples_per_class}")
+        if not 1 <= self.vote_window_size <= 32:
+            raise ValueError(f"vote_window_size must be between 1 and 32, got {self.vote_window_size}")
 
 
 @dataclass
