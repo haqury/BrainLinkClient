@@ -55,8 +55,11 @@ def get_default_history_path() -> str:
 
 def get_default_config() -> ConfigParams:
     """Get default configuration parameters"""
-    return ConfigParams(
+    config = ConfigParams(
         eeg_fault=DEFAULT_BASE_FAULT,
         eeg_fault_multi=DEFAULT_MULTI_FAULT,
         multi_count=DEFAULT_MULTI_COUNT
     )
+    # get_event_name_by() matches against eeg_faults — must be populated at startup
+    config.eeg_faults = [DEFAULT_BASE_FAULT]
+    return config

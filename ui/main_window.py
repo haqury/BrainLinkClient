@@ -4,12 +4,14 @@ import json
 import logging
 import asyncio
 import threading
+import time
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QCheckBox, QLineEdit, QFileDialog, QGroupBox, QMessageBox,
-    QSystemTrayIcon, QComboBox
+    QSystemTrayIcon, QComboBox, QButtonGroup, QRadioButton, QApplication,
+    QTextEdit, QPlainTextEdit, QSpinBox, QDoubleSpinBox, QAbstractSpinBox
 )
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QEvent
 from pynput import keyboard
 from typing import Optional
 
@@ -69,6 +71,12 @@ class MainWindow(QMainWindow):
         
         # Configuration - load defaults from config_defaults.py
         self.config = get_default_config()
+        # Ensure multi-level fault list is ready for rule-based history matching
+        self.set_config_fault(
+            self.config.eeg_fault,
+            self.config.eeg_fault_multi,
+            self.config.multi_count,
+        )
 
         # History file path (persisted between sessions)
         from utils.path_utils import get_config_dir
@@ -107,6 +115,9 @@ class MainWindow(QMainWindow):
         # Setup UI
         self.init_ui()
         self.setup_keyboard_listener()
+        # Eat arrow keys in the UI (except text fields) so Windows/Qt focus
+        # navigation doesn't toggle radios/combos; pynput still labels training.
+        QApplication.instance().installEventFilter(self)
         
         # Connect signals
         self.eeg_data_updated.connect(self.on_eeg_data_updated)
@@ -274,20 +285,40 @@ class MainWindow(QMainWindow):
         control_layout = QHBoxLayout()
         
         self.cb_autouse = QCheckBox("Enable Mouse Control")
-        self.cb_autouse.setToolTip("Enable automatic mouse control based on EEG events")
+        self.cb_autouse.setToolTip("Move the mouse from automatic EEG events (history match or ML)")
         self.cb_use_key = QCheckBox("Use Key Control")
+        self.cb_use_key.setToolTip("Move the mouse while holding arrow keys (manual training / direct control)")
         self.chk_minimize_to_tray = QCheckBox("Minimize to tray")
         self.chk_minimize_to_tray.setChecked(True)
         self.chk_minimize_to_tray.setToolTip("Minimize to system tray instead of closing")
         self.chk_minimize_to_tray.stateChanged.connect(self.on_minimize_to_tray_changed)
-        
+
+        # Explicit prediction mode switch: Base (history) vs ML
+        prediction_mode_label = QLabel("Prediction:")
+        self.rb_pred_base = QRadioButton("Base")
+        self.rb_pred_base.setToolTip("Rule-based: match current EEG against history")
+        self.rb_pred_ml = QRadioButton("ML")
+        self.rb_pred_ml.setToolTip("ML model predictions (requires trained model)")
+        self.rb_pred_base.setChecked(True)
+        # Don't let arrow-key focus navigation toggle prediction mode
+        self.rb_pred_base.setFocusPolicy(Qt.ClickFocus)
+        self.rb_pred_ml.setFocusPolicy(Qt.ClickFocus)
+        self.prediction_mode_group = QButtonGroup(self)
+        self.prediction_mode_group.addButton(self.rb_pred_base, 0)
+        self.prediction_mode_group.addButton(self.rb_pred_ml, 1)
+        self.prediction_mode_group.buttonClicked.connect(self.on_prediction_mode_changed)
+
+        # Keep hidden checkbox for sync with ML Control form / existing code paths
         self.chk_use_ml_prediction = QCheckBox("Use ML Prediction")
-        self.chk_use_ml_prediction.setToolTip("Use ML model predictions instead of rule-based detection (requires trained model)")
         self.chk_use_ml_prediction.setChecked(False)
+        self.chk_use_ml_prediction.setVisible(False)
         self.chk_use_ml_prediction.stateChanged.connect(self.on_use_ml_prediction_changed)
         
         control_layout.addWidget(self.cb_autouse)
         control_layout.addWidget(self.cb_use_key)
+        control_layout.addWidget(prediction_mode_label)
+        control_layout.addWidget(self.rb_pred_base)
+        control_layout.addWidget(self.rb_pred_ml)
         control_layout.addWidget(self.chk_use_ml_prediction)
         control_layout.addWidget(self.chk_minimize_to_tray)
         
@@ -431,6 +462,19 @@ class MainWindow(QMainWindow):
         
         main_layout.addStretch()
 
+    def eventFilter(self, obj, event):
+        """Block arrow-key widget navigation; keep arrows for text editing only."""
+        if event.type() == QEvent.KeyPress:
+            key = event.key()
+            if key in (Qt.Key_Left, Qt.Key_Right, Qt.Key_Up, Qt.Key_Down):
+                focus = QApplication.focusWidget()
+                # Allow caret movement in editable fields
+                if isinstance(focus, (QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox)):
+                    return False
+                # Swallow everywhere else in this app (radios, combo, checkboxes, …)
+                return True
+        return super().eventFilter(obj, event)
+
     def setup_keyboard_listener(self):
         """Setup global keyboard listener"""
         def on_press(key):
@@ -444,7 +488,7 @@ class MainWindow(QMainWindow):
                     self.cb_mu.setChecked(True)
                 elif key == keyboard.Key.down:
                     self.cb_md.setChecked(True)
-            except:
+            except Exception:
                 pass
         
         def on_release(key):
@@ -458,7 +502,7 @@ class MainWindow(QMainWindow):
                     self.cb_mu.setChecked(False)
                 elif key == keyboard.Key.down:
                     self.cb_md.setChecked(False)
-            except:
+            except Exception:
                 pass
         
         self.keyboard_listener = keyboard.Listener(
@@ -646,11 +690,41 @@ class MainWindow(QMainWindow):
         """Handle minimize to tray checkbox state change"""
         self._minimize_to_tray = (state == Qt.Checked)
     
+    def on_prediction_mode_changed(self, button):
+        """Handle Prediction Base/ML radio switch."""
+        use_ml = button is self.rb_pred_ml
+        self.chk_use_ml_prediction.blockSignals(True)
+        self.chk_use_ml_prediction.setChecked(use_ml)
+        self.chk_use_ml_prediction.blockSignals(False)
+        self._use_ml_prediction = use_ml
+        logger.info(f"Prediction mode: {'ML' if use_ml else 'Base (history)'}")
+        if hasattr(self, 'ml_control_form') and self.ml_control_form and hasattr(self.ml_control_form, 'chk_use_ml'):
+            try:
+                self.ml_control_form.chk_use_ml.blockSignals(True)
+                self.ml_control_form.chk_use_ml.setChecked(use_ml)
+                self.ml_control_form.chk_use_ml.blockSignals(False)
+            except Exception:
+                pass
+        self._sticky_game_event = ""
+        self._sticky_game_event_ts = 0.0
+        self._pending_game_event = ""
+        self._pending_game_event_count = 0
+
     def on_use_ml_prediction_changed(self, state):
         """Handle use ML prediction checkbox state change (checkbox is never auto-unchecked; no errors if model missing)."""
         enabled = state == Qt.Checked
         self._use_ml_prediction = enabled
         logger.info(f"ML prediction: {'enabled' if enabled else 'disabled'}")
+        # Keep radio buttons in sync (e.g. when toggled from ML Control form)
+        if hasattr(self, 'rb_pred_ml') and hasattr(self, 'rb_pred_base'):
+            self.rb_pred_ml.blockSignals(True)
+            self.rb_pred_base.blockSignals(True)
+            if enabled:
+                self.rb_pred_ml.setChecked(True)
+            else:
+                self.rb_pred_base.setChecked(True)
+            self.rb_pred_ml.blockSignals(False)
+            self.rb_pred_base.blockSignals(False)
         # Sync ML control form if open
         if hasattr(self, 'ml_control_form') and self.ml_control_form:
             try:
@@ -659,6 +733,10 @@ class MainWindow(QMainWindow):
                 self.ml_control_form.chk_use_ml.blockSignals(False)
             except Exception:
                 pass
+        self._sticky_game_event = ""
+        self._sticky_game_event_ts = 0.0
+        self._pending_game_event = ""
+        self._pending_game_event_count = 0
 
     # ==================== History path persistence ====================
     def _load_history_path(self) -> str:
@@ -1355,41 +1433,40 @@ class MainWindow(QMainWindow):
             high_gamma=model.high_gamma,
             event_name=label_event_name
         )
+
+        # Rule-based: when ML is off and user is not holding a training key,
+        # detect event by matching current EEG against history.
+        if not self._use_ml_prediction and not label_event_name:
+            matched = self.history_service.get_event_name_by(h, self.config)
+            if matched:
+                event_name = matched
+                event_source = "rule-based"
+                logger.debug(f"History matched event: {event_name}")
         
-        # Process mouse control (use event_name = ML prediction or rule-based for actual control)
-        if self.cb_autouse.isChecked():
-            if event_name and event_name != EventType.STOP.value:
-                self.mouse_service.play(h, self.config, event_name, self.cb_use_key.isChecked())
+        # Mouse control:
+        # - Use Key Control: move mouse from arrow keys (manual)
+        # - Enable Mouse Control: move mouse from automatic EEG prediction (history/ML)
+        if label_event_name:
+            if self.cb_use_key.isChecked() and label_event_name != EventType.STOP.value:
+                self.mouse_service.play(h, self.config, label_event_name)
             else:
-                # No valid event - stop movement
+                self.mouse_service.stop()
+        elif self.cb_autouse.isChecked():
+            if event_name and event_name != EventType.STOP.value:
+                self.mouse_service.play(h, self.config, event_name)
+            else:
                 self.mouse_service.stop()
         else:
-            # Use history-based detection ONLY if ML didn't set event_name
-            # If ML is enabled and set event_name, don't overwrite it with rule-based!
-            if self._use_ml_prediction and event_source.startswith("ml-") and event_name:
-                # ML already set event_name - use it, don't overwrite with rule-based
-                if event_name and event_name != EventType.STOP.value:
-                    self.mouse_service.play(h, self.config, event_name, self.cb_use_key.isChecked())
-                else:
-                    self.mouse_service.stop()
-            else:
-                # ML not enabled or didn't set event - use history-based detection
-                history_event_name = self.history_service.get_event_name_by(h, self.config)
-                # Only play if event_name is not empty and not stop
-                if history_event_name and history_event_name != EventType.STOP.value:
-                    self.mouse_service.play(h, self.config, history_event_name, self.cb_use_key.isChecked())
-                else:
-                    # No event detected - stop movement
-                    self.mouse_service.stop()
-                # Note: Don't overwrite event_name here - keep ML prediction if it was set
+            self.mouse_service.stop()
         
         # Update EEG data form if open
         if self.eeg_data_form and self.eeg_data_form.isVisible():
             self.eeg_data_form.update_data(model)
         
-        # Add to history only when ML prediction is off (otherwise we'd save predictions)
+        # Add to history only when manually labeled and ML prediction is off
         if h.event_name and not self._use_ml_prediction:
             self.history_service.add(h)
+            self.update_counter()
         
         # Collect training data if in training mode.
         # ВАЖНО: используем label_event_name (ручной / rule-based),
@@ -1454,6 +1531,45 @@ class MainWindow(QMainWindow):
             else:
                 # ML disabled - allow rule-based
                 game_event = event_name
+
+            # Stabilize events for the game:
+            # - don't clear on a single missed history match (hold last event briefly)
+            # - require 2 consecutive same events before switching direction (reduce ml↔mr flicker)
+            now = time.monotonic()
+            hold_sec = 1.0
+            switch_confirm = 2
+            if not hasattr(self, "_sticky_game_event"):
+                self._sticky_game_event = ""
+                self._sticky_game_event_ts = 0.0
+                self._pending_game_event = ""
+                self._pending_game_event_count = 0
+
+            raw_event = game_event or ""
+            if raw_event:
+                if raw_event == self._sticky_game_event:
+                    self._sticky_game_event_ts = now
+                    self._pending_game_event = ""
+                    self._pending_game_event_count = 0
+                elif raw_event == self._pending_game_event:
+                    self._pending_game_event_count += 1
+                    if self._pending_game_event_count >= switch_confirm or not self._sticky_game_event:
+                        self._sticky_game_event = raw_event
+                        self._sticky_game_event_ts = now
+                        self._pending_game_event = ""
+                        self._pending_game_event_count = 0
+                else:
+                    self._pending_game_event = raw_event
+                    self._pending_game_event_count = 1
+                    if not self._sticky_game_event:
+                        self._sticky_game_event = raw_event
+                        self._sticky_game_event_ts = now
+                game_event = self._sticky_game_event
+            else:
+                if self._sticky_game_event and (now - self._sticky_game_event_ts) < hold_sec:
+                    game_event = self._sticky_game_event
+                else:
+                    self._sticky_game_event = ""
+                    game_event = ""
             
             # Log before filtering to see what we have
             if not hasattr(self, '_pre_filter_log_counter'):
@@ -1489,6 +1605,17 @@ class MainWindow(QMainWindow):
                 "ml_confidence": getattr(self, '_last_ml_confidence', 0.0),
                 "ml_probabilities": getattr(self, '_last_ml_probabilities', {}),
             }
+            # Game scales movement by ml_confidence. Rule-based has no ML score —
+            # send full confidence so events are not treated as "zero speed".
+            if game_event and not self._use_ml_prediction:
+                eeg_data["ml_confidence"] = 1.0
+                eeg_data["ml_probabilities"] = {
+                    "ml": 1.0 if game_event == "ml" else 0.0,
+                    "mr": 1.0 if game_event == "mr" else 0.0,
+                    "mu": 1.0 if game_event == "mu" else 0.0,
+                    "md": 1.0 if game_event == "md" else 0.0,
+                    "stop": 1.0 if game_event == "stop" else 0.0,
+                }
             # Always call update_eeg_data, even if event hasn't changed (to ensure it persists in shared memory)
             # Log before sending to shared memory (only for non-empty events, and only when it changes)
             if game_event and game_event != "":
@@ -1521,14 +1648,15 @@ class MainWindow(QMainWindow):
             
             # Update event source indicator
             if game_event:
-                source_text = "ML" if event_source == "ml-prediction" else "Rule"
+                source_text = "ML" if event_source.startswith("ml-") else "Base"
                 self.lbl_shm_event_source.setText(f"Event: {game_event} ({source_text})")
-                if event_source == "ml-prediction":
+                if event_source.startswith("ml-"):
                     self.lbl_shm_event_source.setStyleSheet("color: #4CAF50; font-size: 9pt; font-weight: bold;")
                 else:
-                    self.lbl_shm_event_source.setStyleSheet("color: #888; font-size: 9pt;")
+                    self.lbl_shm_event_source.setStyleSheet("color: #64B5F6; font-size: 9pt;")
             else:
-                self.lbl_shm_event_source.setText("Event: -")
+                mode = "ML" if self._use_ml_prediction else "Base"
+                self.lbl_shm_event_source.setText(f"Event: - ({mode})")
                 self.lbl_shm_event_source.setStyleSheet("color: #888; font-size: 9pt;")
 
     def on_extend_data_event(self, model: BrainLinkExtendModel):

@@ -202,16 +202,17 @@ class ConfigForm(QDialog):
         self.close()
     
     def on_browse_clicked(self):
-        """Handle browse button click"""
+        """Pick a config file path only (Load/Save are separate buttons)."""
         from utils.path_utils import get_config_dir
-        file_path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Select Config File",
-            str(get_config_dir()),
-            "JSON Files (*.json)"
-        )
-        if file_path:
-            self.txt_filepath.setText(file_path)
+        start_dir = self.txt_filepath.text().strip() or str(get_config_dir())
+        dialog = QFileDialog(self, "Select Config File", start_dir, "JSON Files (*.json)")
+        dialog.setFileMode(QFileDialog.AnyFile)
+        dialog.setAcceptMode(QFileDialog.AcceptOpen)
+        dialog.setOption(QFileDialog.DontConfirmOverwrite, True)
+        if dialog.exec_():
+            selected = dialog.selectedFiles()
+            if selected:
+                self.txt_filepath.setText(selected[0])
     
     def on_load_clicked(self):
         """Handle load button click - loads full configuration"""
