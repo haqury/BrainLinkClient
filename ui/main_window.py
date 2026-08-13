@@ -1148,6 +1148,17 @@ class MainWindow(QMainWindow):
                 device.on_eeg_data = self.on_eeg_data_event
                 device.on_extend_data = self.on_extend_data_event
                 device.on_gyro_data = self.on_gyro_data_event  # Always connect gyro callback
+
+                # Ensure state-machine parser (needed for Extended Data after EEG)
+                try:
+                    from pybrainlink.protocol_parser import ParserState  # noqa: F401
+                    logger.info("pybrainlink parser: state-machine OK (Extended Data supported)")
+                except ImportError:
+                    logger.error(
+                        "pybrainlink parser is outdated (no state-machine). "
+                        "Extended Data will stay at 0. Reinstall: "
+                        "pip install --force-reinstall git+https://github.com/haqury/pybrainlink.git@main"
+                    )
                 
                 logger.info(f"Attempting to connect to device: {address}")
                 
@@ -1522,32 +1533,45 @@ class MainWindow(QMainWindow):
 
     def on_extend_data_event(self, model: BrainLinkExtendModel):
         """Handle extended data event (called from device)"""
-        logger.info(f"🔵 Extended data received from device:")
-        logger.info(f"   AP: {model.ap}")
-        logger.info(f"   Electric: {model.electric}")
-        logger.info(f"   Version: '{model.version}'")
-        logger.info(f"   Temperature: {model.temperature}")
-        logger.info(f"   Heart Rate: {model.heart_rate}")
-        logger.debug(f"   Raw model: {model.__dict__ if hasattr(model, '__dict__') else model}")
-        self.extend_data_updated.emit(model)
+        try:
+            logger.info(
+                "Extended data received: ap=%s electric=%s version=%s temp=%s heart=%s",
+                getattr(model, "ap", None),
+                getattr(model, "electric", None),
+                getattr(model, "version", None),
+                getattr(model, "temperature", None),
+                getattr(model, "heart_rate", None),
+            )
+            self.extend_data_updated.emit(model)
+        except Exception:
+            logger.exception("Failed to forward extended data to UI")
 
     def on_extend_data_updated(self, model: BrainLinkExtendModel):
         """Handle extended data in main thread"""
-        logger.debug(f"Updating UI with extended data: ap={model.ap}, electric={model.electric}")
-        self.lbl_ap.setText(str(model.ap))
-        self.lbl_electric.setText(str(model.electric))
-        self.lbl_version.setText(model.version)
-        self.lbl_temp.setText(str(model.temperature))
-        self.lbl_heart.setText(str(model.heart_rate))
-        
-        # Update shared memory if enabled and game control is enabled
-        if self.shared_memory.is_running and self.chk_enable_game_control.isChecked():
-            self.shared_memory.update_extended_data(
-                ap=model.ap,
-                electric=model.electric,
-                temp=model.temperature,
-                heart=model.heart_rate
-            )
+        try:
+            ap = getattr(model, "ap", 0)
+            electric = getattr(model, "electric", 0)
+            version = getattr(model, "version", "") or ""
+            temperature = getattr(model, "temperature", 0)
+            heart_rate = getattr(model, "heart_rate", 0)
+
+            logger.debug("Updating UI with extended data: ap=%s, electric=%s", ap, electric)
+            self.lbl_ap.setText(str(ap))
+            self.lbl_electric.setText(str(electric))
+            self.lbl_version.setText(str(version))
+            self.lbl_temp.setText(str(temperature))
+            self.lbl_heart.setText(str(heart_rate))
+            
+            # Update shared memory if enabled and game control is enabled
+            if self.shared_memory.is_running and self.chk_enable_game_control.isChecked():
+                self.shared_memory.update_extended_data(
+                    ap=ap,
+                    electric=electric,
+                    temp=temperature,
+                    heart=heart_rate
+                )
+        except Exception:
+            logger.exception("Failed to update Extended Data UI")
     
     def on_gyro_data_event(self, x: int, y: int, z: int):
         """Handle gyro data event (called from device) - forward to gyro form if it exists"""
