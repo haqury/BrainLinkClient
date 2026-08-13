@@ -20,7 +20,12 @@ from pybrainlink import BrainLinkModel, BrainLinkExtendModel
 from models.eeg_models import EegHistoryModel, ConfigParams, EegFaultModel
 from models.event_types import EventType
 from models.ml_models import MLConfig
-from config_defaults import get_default_config, get_default_history_path
+from config_defaults import (
+    get_default_config,
+    get_default_history_path,
+    load_fault_config,
+    save_fault_config,
+)
 from pathlib import Path
 from services.history_service import HistoryService
 from services.mouse_service import MouseService
@@ -69,14 +74,20 @@ class MainWindow(QMainWindow):
         self.ml_predictor = MLPredictorService(self.ml_trainer)
         self._use_ml_prediction = False  # Flag to switch between rule-based and ML prediction
         
-        # Configuration - load defaults from config_defaults.py
+        # Configuration - defaults, then persisted config/config.json (or def_conf.json)
         self.config = get_default_config()
-        # Ensure multi-level fault list is ready for rule-based history matching
-        self.set_config_fault(
-            self.config.eeg_fault,
-            self.config.eeg_fault_multi,
-            self.config.multi_count,
-        )
+        persisted = load_fault_config()
+        if persisted:
+            base, multi, multi_count = persisted
+            self.set_config_fault(base, multi, multi_count, persist=False)
+        else:
+            # Ensure multi-level fault list is ready for rule-based history matching
+            self.set_config_fault(
+                self.config.eeg_fault,
+                self.config.eeg_fault_multi,
+                self.config.multi_count,
+                persist=False,
+            )
 
         # History file path (persisted between sessions)
         from utils.path_utils import get_config_dir
@@ -1172,9 +1183,16 @@ class MainWindow(QMainWindow):
             return EventType.STOP.value
         return ""
 
-    def set_config_fault(self, config: EegFaultModel, config_multi: EegFaultModel, multi_count: int):
-        """Set configuration from config form"""
+    def set_config_fault(
+        self,
+        config: EegFaultModel,
+        config_multi: EegFaultModel,
+        multi_count: int,
+        persist: bool = True,
+    ):
+        """Set configuration from config form and optionally persist to disk."""
         self.config.eeg_fault = config
+        self.config.eeg_fault_multi = config_multi
         self.config.eeg_faults = [config]
         
         # Generate multi-level faults
@@ -1196,6 +1214,8 @@ class MainWindow(QMainWindow):
         
         self.config.multi_count = multi_count
         logger.info(f"Config updated: multi_count={multi_count}")
+        if persist:
+            save_fault_config(config, config_multi, multi_count)
 
     def connect_device(self, address: str):
         """Connect to BrainLink device via pybrainlink with proper error handling"""
@@ -1437,11 +1457,15 @@ class MainWindow(QMainWindow):
         # Rule-based: when ML is off and user is not holding a training key,
         # detect event by matching current EEG against history.
         if not self._use_ml_prediction and not label_event_name:
-            matched = self.history_service.get_event_name_by(h, self.config)
+            matched, match_confidence = self.history_service.get_event_name_by(h, self.config)
             if matched:
                 event_name = matched
                 event_source = "rule-based"
-                logger.debug(f"History matched event: {event_name}")
+                self._last_base_confidence = match_confidence
+                logger.debug(
+                    f"History matched event: {event_name}, "
+                    f"confidence={match_confidence:.3f}"
+                )
         
         # Mouse control:
         # - Use Key Control: move mouse from arrow keys (manual)
@@ -1605,16 +1629,17 @@ class MainWindow(QMainWindow):
                 "ml_confidence": getattr(self, '_last_ml_confidence', 0.0),
                 "ml_probabilities": getattr(self, '_last_ml_probabilities', {}),
             }
-            # Game scales movement by ml_confidence. Rule-based has no ML score —
-            # send full confidence so events are not treated as "zero speed".
+            # Game scales movement by ml_confidence. For Base prediction,
+            # confidence falls as the match uses a wider multi_count radius.
             if game_event and not self._use_ml_prediction:
-                eeg_data["ml_confidence"] = 1.0
+                conf = float(getattr(self, "_last_base_confidence", 1.0))
+                eeg_data["ml_confidence"] = conf
                 eeg_data["ml_probabilities"] = {
-                    "ml": 1.0 if game_event == "ml" else 0.0,
-                    "mr": 1.0 if game_event == "mr" else 0.0,
-                    "mu": 1.0 if game_event == "mu" else 0.0,
-                    "md": 1.0 if game_event == "md" else 0.0,
-                    "stop": 1.0 if game_event == "stop" else 0.0,
+                    "ml": conf if game_event == "ml" else 0.0,
+                    "mr": conf if game_event == "mr" else 0.0,
+                    "mu": conf if game_event == "mu" else 0.0,
+                    "md": conf if game_event == "md" else 0.0,
+                    "stop": conf if game_event == "stop" else 0.0,
                 }
             # Always call update_eeg_data, even if event hasn't changed (to ensure it persists in shared memory)
             # Log before sending to shared memory (only for non-empty events, and only when it changes)

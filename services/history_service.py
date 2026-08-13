@@ -2,7 +2,7 @@
 
 import json
 import logging
-from typing import List, Dict
+from typing import List, Tuple
 from pathlib import Path
 from models.eeg_models import EegHistoryModel, ConfigParams, EegFaultModel
 from models.event_types import EventType
@@ -57,18 +57,37 @@ class HistoryService:
         except Exception as e:
             logger.error(f"Error saving history: {e}", exc_info=True)
 
-    def get_event_name_by(self, current: EegHistoryModel, config: ConfigParams) -> str:
+    @staticmethod
+    def confidence_for_match_level(match_level: int, multi_count: int) -> float:
         """
-        Get event name by matching current data with historical patterns
+        Confidence for a rule-based match: 1.0 at the tightest (first) radius,
+        decreasing linearly toward wider multi_count levels.
+        level 0 / N -> 1.0, level N-1 / N -> 1/N
+        """
+        n = max(int(multi_count), 1)
+        level = max(0, min(int(match_level), n - 1))
+        return (n - level) / n
+
+    def get_event_name_by(
+        self, current: EegHistoryModel, config: ConfigParams
+    ) -> Tuple[str, float]:
+        """
+        Match current EEG against history across multi_count fault radii.
+
+        Returns:
+            (event_name, confidence). Confidence is 1.0 when matched at the
+            tightest radius and decreases as the match requires a wider
+            multi_count level. Empty event -> confidence 0.0.
         """
         if not self.history:
-            return ""
+            return "", 0.0
 
         results_list = []
         faults = list(reversed(config.eeg_faults))
         current_results = list(self.history)
+        multi_count = max(int(config.multi_count), 1)
 
-        for i in range(config.multi_count):
+        for i in range(multi_count):
             if i != 0:
                 current_results = results_list[i - 1]
 
@@ -77,9 +96,10 @@ class HistoryService:
                     self._search_events(current_results, current, faults[i])
                 )
 
+        # After reverse: index 0 = tightest radius (first), last = widest
         results_list.reverse()
 
-        for results in results_list:
+        for match_level, results in enumerate(results_list):
             if not results:
                 continue
 
@@ -95,9 +115,14 @@ class HistoryService:
             if counts:
                 max_event = max(counts.items(), key=lambda x: x[1])
                 if max_event[1] > 0:
-                    return max_event[0]
+                    confidence = self.confidence_for_match_level(match_level, multi_count)
+                    logger.debug(
+                        f"History match '{max_event[0]}' at multi level "
+                        f"{match_level + 1}/{multi_count}, confidence={confidence:.3f}"
+                    )
+                    return max_event[0], confidence
 
-        return ""
+        return "", 0.0
 
     def _search_events(
         self,

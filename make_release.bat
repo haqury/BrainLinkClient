@@ -9,10 +9,12 @@ if exist "build.bat" (
     call build.bat
 ) else (
     echo build.bat not found, running PyInstaller directly...
-    if exist "venv\Scripts\activate.bat" (
+    if exist ".venv\Scripts\activate.bat" (
+        call ".venv\Scripts\activate.bat"
+    ) else if exist "venv\Scripts\activate.bat" (
         call "venv\Scripts\activate.bat"
     )
-    pyinstaller BrainLinkClient.spec
+    pyinstaller --noconfirm BrainLinkClient.spec
 )
 
 REM Create release folder
@@ -23,12 +25,11 @@ if not exist "release" (
 echo.
 echo [BrainLinkClient] Packing release zip...
 
-REM Use PowerShell Compress-Archive to create zip
+REM Pack exe + docs that exist
 powershell -NoLogo -NoProfile -Command ^
- "Compress-Archive -Path 'dist\\BrainLinkClient.exe','README.md','INSTALL.md','LICENSE' -DestinationPath 'release\\BrainLinkClient_win64.zip' -Force"
+ "$items=@('dist\\BrainLinkClient.exe'); foreach($f in @('README.md','INSTALL.md','LICENSE')){ if(Test-Path $f){ $items+=$f } }; Compress-Archive -Path $items -DestinationPath 'release\\BrainLinkClient_win64.zip' -Force"
 
 echo.
 echo [BrainLinkClient] Release created: release\BrainLinkClient_win64.zip
 echo.
-pause
 

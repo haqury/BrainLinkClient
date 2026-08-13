@@ -10,7 +10,13 @@ import json
 from pathlib import Path
 
 from models.eeg_models import EegFaultModel
-from config_defaults import DEFAULT_BASE_FAULT, DEFAULT_MULTI_FAULT, DEFAULT_MULTI_COUNT, DEFAULT_CONFIG_PATH
+from config_defaults import (
+    DEFAULT_BASE_FAULT,
+    DEFAULT_MULTI_FAULT,
+    DEFAULT_MULTI_COUNT,
+    get_default_config_path,
+    save_fault_config,
+)
 from .styles import apply_brainlink_style
 
 logger = logging.getLogger(__name__)
@@ -92,7 +98,7 @@ class ConfigForm(QDialog):
         # File path for save/load
         file_layout = QHBoxLayout()
         file_layout.addWidget(QLabel("Config File:"))
-        self.txt_filepath = QLineEdit(DEFAULT_CONFIG_PATH)
+        self.txt_filepath = QLineEdit(get_default_config_path())
         file_layout.addWidget(self.txt_filepath)
         
         self.btn_browse = QPushButton("Browse")
@@ -269,24 +275,6 @@ class ConfigForm(QDialog):
         base_config = self.get_config_fault()
         multi_config = self.get_config_fault_multi()
         multi_count = self.get_multi_count()
-        file_path = Path(self.txt_filepath.text())
-        
-        try:
-            # Create directory if it doesn't exist
-            file_path.parent.mkdir(parents=True, exist_ok=True)
-            
-            # Save complete configuration
-            full_config = {
-                "base_fault": base_config.to_dict(),
-                "multi_fault": multi_config.to_dict(),
-                "multi_count": multi_count
-            }
-            
-            with open(file_path, 'w', encoding='utf-8') as f:
-                json.dump(full_config, f, indent=2)
-                logger.info(f"Config saved to {file_path}")
-                logger.debug(f"Base fault: {base_config.to_dict()}")
-                logger.debug(f"Multi fault: {multi_config.to_dict()}")
-                logger.debug(f"Multi count: {multi_count}")
-        except Exception as e:
-            logger.error(f"Error saving config: {e}", exc_info=True)
+        file_path = self.txt_filepath.text().strip() or get_default_config_path()
+        self.txt_filepath.setText(file_path)
+        save_fault_config(base_config, multi_config, multi_count, path=file_path)
