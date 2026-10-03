@@ -4,12 +4,14 @@ import json
 import logging
 import asyncio
 import threading
+import time
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QCheckBox, QLineEdit, QFileDialog, QGroupBox, QMessageBox,
-    QSystemTrayIcon, QComboBox
+    QSystemTrayIcon, QComboBox, QButtonGroup, QRadioButton, QApplication,
+    QTextEdit, QPlainTextEdit, QSpinBox, QDoubleSpinBox, QAbstractSpinBox
 )
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QEvent
 from pynput import keyboard
 from typing import Optional
 
@@ -18,7 +20,12 @@ from pybrainlink import BrainLinkModel, BrainLinkExtendModel
 from models.eeg_models import EegHistoryModel, ConfigParams, EegFaultModel
 from models.event_types import EventType
 from models.ml_models import MLConfig
-from config_defaults import get_default_config, get_default_history_path
+from config_defaults import (
+    get_default_config,
+    get_default_history_path,
+    load_fault_config,
+    save_fault_config,
+)
 from pathlib import Path
 from services.history_service import HistoryService
 from services.mouse_service import MouseService
@@ -67,8 +74,20 @@ class MainWindow(QMainWindow):
         self.ml_predictor = MLPredictorService(self.ml_trainer)
         self._use_ml_prediction = False  # Flag to switch between rule-based and ML prediction
         
-        # Configuration - load defaults from config_defaults.py
+        # Configuration - defaults, then persisted config/config.json (or def_conf.json)
         self.config = get_default_config()
+        persisted = load_fault_config()
+        if persisted:
+            base, multi, multi_count = persisted
+            self.set_config_fault(base, multi, multi_count, persist=False)
+        else:
+            # Ensure multi-level fault list is ready for rule-based history matching
+            self.set_config_fault(
+                self.config.eeg_fault,
+                self.config.eeg_fault_multi,
+                self.config.multi_count,
+                persist=False,
+            )
 
         # History file path (persisted between sessions)
         from utils.path_utils import get_config_dir
@@ -107,6 +126,9 @@ class MainWindow(QMainWindow):
         # Setup UI
         self.init_ui()
         self.setup_keyboard_listener()
+        # Eat arrow keys in the UI (except text fields) so Windows/Qt focus
+        # navigation doesn't toggle radios/combos; pynput still labels training.
+        QApplication.instance().installEventFilter(self)
         
         # Connect signals
         self.eeg_data_updated.connect(self.on_eeg_data_updated)
@@ -132,6 +154,9 @@ class MainWindow(QMainWindow):
         self.ml_trainer.model_updated.connect(self.on_model_updated)
         
         logger.info("MainWindow initialized with system tray")
+
+        from utils.brainlink_game_export import write_brainlink_export
+        QTimer.singleShot(800, lambda: write_brainlink_export(self))
         
         # Initialize devices on startup
         QTimer.singleShot(500, self.initialize_devices)
@@ -279,20 +304,40 @@ class MainWindow(QMainWindow):
         control_layout = QHBoxLayout()
         
         self.cb_autouse = QCheckBox("Enable Mouse Control")
-        self.cb_autouse.setToolTip("Enable automatic mouse control based on EEG events")
+        self.cb_autouse.setToolTip("Move the mouse from automatic EEG events (history match or ML)")
         self.cb_use_key = QCheckBox("Use Key Control")
+        self.cb_use_key.setToolTip("Move the mouse while holding arrow keys (manual training / direct control)")
         self.chk_minimize_to_tray = QCheckBox("Minimize to tray")
         self.chk_minimize_to_tray.setChecked(True)
         self.chk_minimize_to_tray.setToolTip("Minimize to system tray instead of closing")
         self.chk_minimize_to_tray.stateChanged.connect(self.on_minimize_to_tray_changed)
-        
+
+        # Explicit prediction mode switch: Base (history) vs ML
+        prediction_mode_label = QLabel("Prediction:")
+        self.rb_pred_base = QRadioButton("Base")
+        self.rb_pred_base.setToolTip("Rule-based: match current EEG against history")
+        self.rb_pred_ml = QRadioButton("ML")
+        self.rb_pred_ml.setToolTip("ML model predictions (requires trained model)")
+        self.rb_pred_base.setChecked(True)
+        # Don't let arrow-key focus navigation toggle prediction mode
+        self.rb_pred_base.setFocusPolicy(Qt.ClickFocus)
+        self.rb_pred_ml.setFocusPolicy(Qt.ClickFocus)
+        self.prediction_mode_group = QButtonGroup(self)
+        self.prediction_mode_group.addButton(self.rb_pred_base, 0)
+        self.prediction_mode_group.addButton(self.rb_pred_ml, 1)
+        self.prediction_mode_group.buttonClicked.connect(self.on_prediction_mode_changed)
+
+        # Keep hidden checkbox for sync with ML Control form / existing code paths
         self.chk_use_ml_prediction = QCheckBox("Use ML Prediction")
-        self.chk_use_ml_prediction.setToolTip("Use ML model predictions instead of rule-based detection (requires trained model)")
         self.chk_use_ml_prediction.setChecked(False)
+        self.chk_use_ml_prediction.setVisible(False)
         self.chk_use_ml_prediction.stateChanged.connect(self.on_use_ml_prediction_changed)
         
         control_layout.addWidget(self.cb_autouse)
         control_layout.addWidget(self.cb_use_key)
+        control_layout.addWidget(prediction_mode_label)
+        control_layout.addWidget(self.rb_pred_base)
+        control_layout.addWidget(self.rb_pred_ml)
         control_layout.addWidget(self.chk_use_ml_prediction)
         control_layout.addWidget(self.chk_minimize_to_tray)
         
@@ -436,6 +481,19 @@ class MainWindow(QMainWindow):
         
         main_layout.addStretch()
 
+    def eventFilter(self, obj, event):
+        """Block arrow-key widget navigation; keep arrows for text editing only."""
+        if event.type() == QEvent.KeyPress:
+            key = event.key()
+            if key in (Qt.Key_Left, Qt.Key_Right, Qt.Key_Up, Qt.Key_Down):
+                focus = QApplication.focusWidget()
+                # Allow caret movement in editable fields
+                if isinstance(focus, (QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox)):
+                    return False
+                # Swallow everywhere else in this app (radios, combo, checkboxes, …)
+                return True
+        return super().eventFilter(obj, event)
+
     def setup_keyboard_listener(self):
         """Setup global keyboard listener"""
         def on_press(key):
@@ -449,7 +507,7 @@ class MainWindow(QMainWindow):
                     self.cb_mu.setChecked(True)
                 elif key == keyboard.Key.down:
                     self.cb_md.setChecked(True)
-            except:
+            except Exception:
                 pass
         
         def on_release(key):
@@ -463,7 +521,7 @@ class MainWindow(QMainWindow):
                     self.cb_mu.setChecked(False)
                 elif key == keyboard.Key.down:
                     self.cb_md.setChecked(False)
-            except:
+            except Exception:
                 pass
         
         self.keyboard_listener = keyboard.Listener(
@@ -651,19 +709,48 @@ class MainWindow(QMainWindow):
         """Handle minimize to tray checkbox state change"""
         self._minimize_to_tray = (state == Qt.Checked)
     
-    def on_use_ml_prediction_changed(self, state):
-        """Handle use ML prediction checkbox state change (checkbox is never auto-unchecked; no errors if model missing)."""
-        enabled = state == Qt.Checked
-        self._use_ml_prediction = enabled
-        logger.info(f"ML prediction: {'enabled' if enabled else 'disabled'}")
-        # Sync ML control form if open
-        if hasattr(self, 'ml_control_form') and self.ml_control_form:
+    def set_prediction_mode(self, use_ml: bool):
+        """
+        Set Base/ML prediction mode and sync all related UI controls.
+        Safe to call from UI or shared-memory game commands.
+        """
+        use_ml = bool(use_ml)
+        if hasattr(self, 'rb_pred_ml') and hasattr(self, 'rb_pred_base'):
+            self.rb_pred_ml.blockSignals(True)
+            self.rb_pred_base.blockSignals(True)
+            if use_ml:
+                self.rb_pred_ml.setChecked(True)
+            else:
+                self.rb_pred_base.setChecked(True)
+            self.rb_pred_ml.blockSignals(False)
+            self.rb_pred_base.blockSignals(False)
+        if hasattr(self, 'chk_use_ml_prediction'):
+            self.chk_use_ml_prediction.blockSignals(True)
+            self.chk_use_ml_prediction.setChecked(use_ml)
+            self.chk_use_ml_prediction.blockSignals(False)
+        self._use_ml_prediction = use_ml
+        logger.info(f"Prediction mode: {'ML' if use_ml else 'Base (history)'}")
+        if hasattr(self, 'ml_control_form') and self.ml_control_form and hasattr(self.ml_control_form, 'chk_use_ml'):
             try:
                 self.ml_control_form.chk_use_ml.blockSignals(True)
-                self.ml_control_form.chk_use_ml.setChecked(enabled)
+                self.ml_control_form.chk_use_ml.setChecked(use_ml)
                 self.ml_control_form.chk_use_ml.blockSignals(False)
             except Exception:
                 pass
+        self._sticky_game_event = ""
+        self._sticky_game_event_ts = 0.0
+        self._pending_game_event = ""
+        self._pending_game_event_count = 0
+        from utils.brainlink_game_export import write_brainlink_export
+        write_brainlink_export(self)
+
+    def on_prediction_mode_changed(self, button):
+        """Handle Prediction Base/ML radio switch."""
+        self.set_prediction_mode(button is self.rb_pred_ml)
+
+    def on_use_ml_prediction_changed(self, state):
+        """Handle use ML prediction checkbox state change (checkbox is never auto-unchecked; no errors if model missing)."""
+        self.set_prediction_mode(state == Qt.Checked)
 
     # ==================== History path persistence ====================
     def _load_history_path(self) -> str:
@@ -691,6 +778,8 @@ class MainWindow(QMainWindow):
             with open(self._history_config_path, "w", encoding="utf-8") as f:
                 json.dump({"history_path": path}, f, indent=2, ensure_ascii=False)
             logger.info(f"Saved history path to {self._history_config_path}: {path}")
+            from utils.brainlink_game_export import write_brainlink_export
+            write_brainlink_export(self)
         except Exception as e:
             logger.error(f"Failed to save history path config: {e}", exc_info=True)
 
@@ -726,16 +815,9 @@ class MainWindow(QMainWindow):
         self.history_service.load(self._history_path)
         self.update_counter()
         
-        # Keep ML training data in sync with loaded history:
-        # clear existing training_data and rebuild it from the newly loaded history.
+        # Keep ML training data in sync with loaded history
         try:
-            self.ml_trainer.clear_training_data()
-            imported, skipped = self.ml_trainer.import_from_history(self.history_service.history)
-            logger.info(f"Rebuilt ML training data from history: imported={imported}, skipped={skipped}")
-            
-            # Update ML Control window if it's open
-            if self.ml_control_form and self.ml_control_form.isVisible():
-                self.ml_control_form.update_status()
+            self._rebuild_ml_training_from_history()
         except Exception as e:
             logger.error(f"Error rebuilding ML training data from history: {e}", exc_info=True)
 
@@ -928,78 +1010,346 @@ class MainWindow(QMainWindow):
             except:
                 pass
     
+    def _resolve_game_config_path(self) -> Optional[str]:
+        """
+        Resolve path to game_config.json:
+        1) --game-config / self._game_config_path
+        2) %APPDATA%\\BrainLink\\game_config_path.txt
+        """
+        import os
+        game_config_path = getattr(self, "_game_config_path", None)
+        if game_config_path:
+            return str(game_config_path).strip() or None
+
+        fallback_dir = Path(os.environ.get("APPDATA", os.path.expanduser("~"))) / "BrainLink"
+        fallback_file = fallback_dir / "game_config_path.txt"
+        if not fallback_file.exists():
+            return None
+        try:
+            path = fallback_file.read_text(encoding="utf-8").strip()
+            if path:
+                logger.info("Using game config path from %s: %s", fallback_file, path)
+                return path
+        except Exception as e:
+            logger.warning("Could not read game_config_path.txt: %s", e)
+        return None
+
+    def _load_game_brainlink_section(self) -> Optional[dict]:
+        """Load brainlink section from game_config.json. Returns None on failure."""
+        game_config_path = self._resolve_game_config_path()
+        if not game_config_path:
+            logger.warning("No game config path (start BrainLink from game or write game_config_path.txt)")
+            return None
+        path = Path(game_config_path)
+        if not path.exists():
+            logger.warning("Game config file not found: %s", path)
+            return None
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            bl = data.get("brainlink")
+            if not isinstance(bl, dict):
+                logger.warning("Game config missing 'brainlink' section: %s", path)
+                return None
+            return bl
+        except Exception as e:
+            logger.error("Failed to read game config %s: %s", path, e, exc_info=True)
+            return None
+
+    def _rebuild_ml_training_from_history(self) -> None:
+        """Clear ML training buffer and rebuild from current history_service data."""
+        self.ml_trainer.clear_training_data()
+        imported, skipped = self.ml_trainer.import_from_history(self.history_service.history)
+        logger.info(
+            "Rebuilt ML training data from history: imported=%s, skipped=%s",
+            imported,
+            skipped,
+        )
+        if self.ml_control_form and self.ml_control_form.isVisible():
+            self.ml_control_form.update_status()
+
+    def _handle_game_cmd_save_model(self) -> None:
+        """COMMAND_TYPE 3: save trained model to brainlink.model_path."""
+        bl = self._load_game_brainlink_section()
+        if bl is None:
+            self.tray_icon.show_message(
+                "Save model",
+                "Start BrainLink from game to save model.",
+                QSystemTrayIcon.Warning,
+            )
+            return
+        model_path_raw = (bl.get("model_path") or "").strip()
+        if not model_path_raw:
+            logger.warning("Save model command: brainlink.model_path is empty in game config")
+            self.tray_icon.show_message(
+                "Save model",
+                "Set model path in game settings first.",
+                QSystemTrayIcon.Warning,
+            )
+            return
+        model_path = str(Path(model_path_raw).resolve())
+        self.ml_trainer.config.model_path = model_path
+        try:
+            if self.ml_trainer.save_model():
+                logger.info("Saved ML model to %s (from game config)", model_path)
+                from utils.brainlink_game_export import write_brainlink_export
+                write_brainlink_export(self)
+                self.tray_icon.show_message(
+                    "Model Saved",
+                    f"Model saved to: {model_path}",
+                    QSystemTrayIcon.Information,
+                )
+            else:
+                self.tray_icon.show_message(
+                    "Save model",
+                    "No model to save. Train the model first (collect data and train).",
+                    QSystemTrayIcon.Warning,
+                )
+        except Exception as e:
+            logger.error("Failed to save model from game command: %s", e, exc_info=True)
+            self.tray_icon.show_message("Save model", f"Error: {e}", QSystemTrayIcon.Critical)
+
+    def _handle_game_cmd_set_prediction_mode(self) -> None:
+        """COMMAND_TYPE 4: set Base/ML from brainlink.prediction_mode."""
+        bl = self._load_game_brainlink_section()
+        if bl is None:
+            self.tray_icon.show_message(
+                "Prediction mode",
+                "Game config not found.",
+                QSystemTrayIcon.Warning,
+            )
+            return
+        mode = str(bl.get("prediction_mode", "")).strip().lower()
+        if mode not in ("base", "ml"):
+            logger.warning("Invalid prediction_mode in game config: %r (expected 'base'|'ml')", mode)
+            self.tray_icon.show_message(
+                "Prediction mode",
+                f"Invalid prediction_mode: {mode!r}",
+                QSystemTrayIcon.Warning,
+            )
+            return
+        self.set_prediction_mode(use_ml=(mode == "ml"))
+        self.tray_icon.show_message(
+            "Prediction mode",
+            f"Switched to {mode.upper()}",
+            QSystemTrayIcon.Information,
+        )
+
+    def _handle_game_cmd_apply_base_fault(self) -> None:
+        """COMMAND_TYPE 5: apply brainlink.base_fault; keep multi_fault/multi_count."""
+        bl = self._load_game_brainlink_section()
+        if bl is None:
+            self.tray_icon.show_message(
+                "Base fault",
+                "Game config not found.",
+                QSystemTrayIcon.Warning,
+            )
+            return
+        base_raw = bl.get("base_fault")
+        if not isinstance(base_raw, dict):
+            logger.warning("apply_base_fault: brainlink.base_fault missing or not an object")
+            self.tray_icon.show_message(
+                "Base fault",
+                "brainlink.base_fault missing in game config.",
+                QSystemTrayIcon.Warning,
+            )
+            return
+        try:
+            base = EegFaultModel.from_dict(base_raw)
+            multi_raw = bl.get("multi_fault")
+            if isinstance(multi_raw, dict):
+                multi = EegFaultModel.from_dict(multi_raw)
+            else:
+                multi = self.config.eeg_fault_multi or EegFaultModel()
+            if "multi_count" in bl:
+                multi_count = max(1, int(bl.get("multi_count") or 1))
+            else:
+                multi_count = int(self.config.multi_count or 1)
+            self.set_config_fault(base, multi, multi_count, persist=True)
+            logger.info(
+                "Applied fault config from game (multi_count=%s, multi from %s)",
+                multi_count,
+                "game config" if isinstance(multi_raw, dict) else "client",
+            )
+            self.tray_icon.show_message(
+                "Base fault",
+                "Base fault tolerance applied.",
+                QSystemTrayIcon.Information,
+            )
+        except Exception as e:
+            logger.error("Failed to apply base_fault: %s", e, exc_info=True)
+            self.tray_icon.show_message("Base fault", f"Error: {e}", QSystemTrayIcon.Critical)
+
+    def _handle_game_cmd_load_model(self) -> None:
+        """COMMAND_TYPE 6: load model from brainlink.model_path."""
+        bl = self._load_game_brainlink_section()
+        if bl is None:
+            self.tray_icon.show_message(
+                "Load model",
+                "Game config not found.",
+                QSystemTrayIcon.Warning,
+            )
+            return
+        model_path_raw = (bl.get("model_path") or "").strip()
+        if not model_path_raw:
+            logger.warning("Load model: brainlink.model_path is empty")
+            self.tray_icon.show_message(
+                "Load model",
+                "Set model path in game settings first.",
+                QSystemTrayIcon.Warning,
+            )
+            return
+        model_path = str(Path(model_path_raw).resolve())
+        if not Path(model_path).exists():
+            logger.warning("Load model: file not found: %s", model_path)
+            self.tray_icon.show_message(
+                "Load model",
+                f"File not found:\n{model_path}",
+                QSystemTrayIcon.Warning,
+            )
+            return
+        self.ml_trainer.config.model_path = model_path
+        try:
+            ok = self.ml_trainer.load_model()
+            if ok:
+                logger.info("Loaded ML model from %s (game command)", model_path)
+                if hasattr(self, "chk_use_ml_prediction"):
+                    self.chk_use_ml_prediction.setEnabled(True)
+                if self.ml_control_form and self.ml_control_form.isVisible():
+                    self.ml_control_form.update_status()
+                from utils.brainlink_game_export import write_brainlink_export
+                write_brainlink_export(self)
+                self.tray_icon.show_message(
+                    "Load model",
+                    f"Model loaded:\n{model_path}",
+                    QSystemTrayIcon.Information,
+                )
+            else:
+                self.tray_icon.show_message(
+                    "Load model",
+                    "Failed to load/validate model.",
+                    QSystemTrayIcon.Warning,
+                )
+        except Exception as e:
+            logger.error("Load model command failed: %s", e, exc_info=True)
+            self.tray_icon.show_message("Load model", f"Error: {e}", QSystemTrayIcon.Critical)
+
+    def _handle_game_cmd_reset_model(self) -> None:
+        """COMMAND_TYPE 7: clear in-memory model (history untouched)."""
+        try:
+            self.ml_trainer.reset_model()
+            if self.ml_control_form and self.ml_control_form.isVisible():
+                self.ml_control_form.update_status()
+            from utils.brainlink_game_export import write_brainlink_export
+            write_brainlink_export(self)
+            logger.info("ML model reset via game command")
+            self.tray_icon.show_message(
+                "Reset model",
+                "In-memory ML model cleared.",
+                QSystemTrayIcon.Information,
+            )
+        except Exception as e:
+            logger.error("Reset model command failed: %s", e, exc_info=True)
+            self.tray_icon.show_message("Reset model", f"Error: {e}", QSystemTrayIcon.Critical)
+
+    def _handle_game_cmd_load_history(self) -> None:
+        """COMMAND_TYPE 8: load history JSON from brainlink.history_path and rebuild ML data."""
+        bl = self._load_game_brainlink_section()
+        if bl is None:
+            self.tray_icon.show_message(
+                "Load history",
+                "Game config not found.",
+                QSystemTrayIcon.Warning,
+            )
+            return
+        history_path_raw = (bl.get("history_path") or "").strip()
+        if not history_path_raw:
+            logger.warning("Load history: brainlink.history_path is empty")
+            self.tray_icon.show_message(
+                "Load history",
+                "Set history_path in game settings first.",
+                QSystemTrayIcon.Warning,
+            )
+            return
+        history_path = str(Path(history_path_raw).resolve())
+        if not Path(history_path).exists():
+            logger.warning("Load history: file not found: %s", history_path)
+            self.tray_icon.show_message(
+                "Load history",
+                f"File not found:\n{history_path}",
+                QSystemTrayIcon.Warning,
+            )
+            return
+        try:
+            self.history_service.load(history_path)
+            self._history_path = history_path
+            self._save_history_path(history_path)
+            if hasattr(self, "txt_filepath"):
+                self.txt_filepath.setText(history_path)
+            self.update_counter()
+            self._rebuild_ml_training_from_history()
+            logger.info("Loaded history from %s (game command)", history_path)
+            self.tray_icon.show_message(
+                "Load history",
+                f"Loaded {self.history_service.count()} records.",
+                QSystemTrayIcon.Information,
+            )
+        except Exception as e:
+            logger.error("Load history command failed: %s", e, exc_info=True)
+            self.tray_icon.show_message("Load history", f"Error: {e}", QSystemTrayIcon.Critical)
+
     def on_shm_command_received(self, command: dict):
         """Handle command received from game client via shared memory"""
         try:
             command_type = command.get("type", 0)
             event_name = command.get("event", "")
 
-            # Type 3: Save ML model to path from game config — всегда обрабатываем (не зависит от "Accept commands")
+            # Types 3–8: always process (independent of "Accept commands from games").
+            # Payload comes from game_config.json → brainlink.*.
             if command_type == 3:
-                game_config_path = getattr(self, '_game_config_path', None)
-                # Если BrainLink запущен без --game-config, пробуем прочитать путь из файла (игра его записывает при "Save model")
-                if not game_config_path:
-                    import os
-                    fallback_dir = Path(os.environ.get("APPDATA", os.path.expanduser("~"))) / "BrainLink"
-                    fallback_file = fallback_dir / "game_config_path.txt"
-                    if fallback_file.exists():
-                        try:
-                            game_config_path = fallback_file.read_text(encoding="utf-8").strip()
-                            if game_config_path:
-                                logger.info("Using game config path from %s: %s", fallback_file, game_config_path)
-                        except Exception as e:
-                            logger.warning("Could not read game_config_path.txt: %s", e)
-                    if not game_config_path:
-                        logger.warning("Save model command ignored: no game config path (start BrainLink from game or save model from game first)")
-                        self.tray_icon.show_message("Save model", "Start BrainLink from game to save model.", QSystemTrayIcon.Warning)
-                        return
-                path = Path(game_config_path)
-                if not path.exists():
-                    logger.warning("Save model command ignored: game config file not found: %s", path)
-                    self.tray_icon.show_message("Save model", "Game config file not found.", QSystemTrayIcon.Warning)
-                    return
-                try:
-                    with open(path, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                    bl = data.get("brainlink", {})
-                    model_path_raw = (bl.get("model_path") or "").strip()
-                    if not model_path_raw:
-                        logger.warning("Save model command: brainlink.model_path is empty in game config")
-                        self.tray_icon.show_message("Save model", "Set model path in game settings first.", QSystemTrayIcon.Warning)
-                        return
-                    # Абсолютный путь, чтобы сохранить в нужное место независимо от cwd
-                    model_path = str(Path(model_path_raw).resolve())
-                    self.ml_trainer.config.model_path = model_path
-                    if self.ml_trainer.save_model():
-                        logger.info("Saved ML model to %s (from game config)", model_path)
-                        self.tray_icon.show_message("Model Saved", f"Model saved to: {model_path}", QSystemTrayIcon.Information)
-                    else:
-                        self.tray_icon.show_message("Save model", "No model to save. Train the model first (collect data and train).", QSystemTrayIcon.Warning)
-                except Exception as e:
-                    logger.error("Failed to save model from game command: %s", e, exc_info=True)
-                    self.tray_icon.show_message("Save model", f"Error: {e}", QSystemTrayIcon.Critical)
+                self._handle_game_cmd_save_model()
+                return
+            if command_type == 4:
+                self._handle_game_cmd_set_prediction_mode()
+                return
+            if command_type == 5:
+                self._handle_game_cmd_apply_base_fault()
+                return
+            if command_type == 6:
+                self._handle_game_cmd_load_model()
+                return
+            if command_type == 7:
+                self._handle_game_cmd_reset_model()
+                return
+            if command_type == 8:
+                self._handle_game_cmd_load_history()
+                return
+            if command_type == 9:
+                from utils.brainlink_game_export import write_brainlink_export
+                write_brainlink_export(self)
+                logger.info("Exported BrainLink settings for game (command type 9)")
                 return
 
-            # Остальные команды — только если включено "Accept commands from games"
+            # Types 1–2 — only if "Accept commands from games" is enabled
             if not self.chk_accept_game_commands.isChecked():
                 logger.debug("Game commands ignored: 'Accept commands from games' is disabled")
                 return
-            
+
             if not event_name:
                 logger.warning("Received command with empty event name")
                 return
-            
+
             logger.info(f"Processing command from game: type={command_type}, event={event_name}")
-            
+
             # Segment boundary: reset vote buffer on Type 1/2 so snapshots do not mix with "between keypresses"
             if command_type in (1, 2) and hasattr(self, 'ml_predictor') and hasattr(self.ml_predictor, 'reset_vote_buffer'):
                 self.ml_predictor.reset_vote_buffer()
-            
+
             # "ne" = action interrupted / absence of action — only used to reset vote buffer and stop movement; do not save to history or ML
             if event_name == EventType.NEUTRAL.value:
                 logger.debug("Action interrupted (ne): vote buffer reset; not saving to history or ML")
                 return
-            
+
             # Type 1: Save event to history (only when we have EEG data; skip when ML on — game may echo our prediction)
             if command_type == 1:
                 if not self.chk_auto_save_history.isChecked():
@@ -1034,7 +1384,7 @@ class MainWindow(QMainWindow):
                     f"Game saved event: {event_name}",
                     QSystemTrayIcon.Information
                 )
-            
+
             # Type 2: Save for ML training (only when we have EEG data from device — no zero-only)
             elif command_type == 2:
                 if not self.chk_auto_save_ml.isChecked():
@@ -1085,13 +1435,13 @@ class MainWindow(QMainWindow):
                     f"Game added training sample: {event_name}",
                     QSystemTrayIcon.Information
                 )
-            
+
             else:
                 logger.warning(f"Unknown command type: {command_type}")
-        
+
         except Exception as e:
             logger.error(f"Error processing shared memory command: {e}", exc_info=True)
-    
+
     def update_counter(self):
         """Update history counter display"""
         self.lbl_counter.setText(str(self.history_service.count()))
@@ -1110,9 +1460,16 @@ class MainWindow(QMainWindow):
             return EventType.STOP.value
         return ""
 
-    def set_config_fault(self, config: EegFaultModel, config_multi: EegFaultModel, multi_count: int):
-        """Set configuration from config form"""
+    def set_config_fault(
+        self,
+        config: EegFaultModel,
+        config_multi: EegFaultModel,
+        multi_count: int,
+        persist: bool = True,
+    ):
+        """Set configuration from config form and optionally persist to disk."""
         self.config.eeg_fault = config
+        self.config.eeg_fault_multi = config_multi
         self.config.eeg_faults = [config]
         
         # Generate multi-level faults
@@ -1121,6 +1478,7 @@ class MainWindow(QMainWindow):
             new_fault = EegFaultModel(
                 attention=int(prev_fault.attention * config_multi.attention),
                 meditation=int(prev_fault.meditation * config_multi.meditation),
+                signal=int(prev_fault.signal * max(config_multi.signal, 1)),
                 low_alpha=int(prev_fault.low_alpha * config_multi.low_alpha),
                 low_beta=int(prev_fault.low_beta * config_multi.low_beta),
                 low_gamma=int(prev_fault.low_gamma * config_multi.low_gamma),
@@ -1134,6 +1492,18 @@ class MainWindow(QMainWindow):
         
         self.config.multi_count = multi_count
         logger.info(f"Config updated: multi_count={multi_count}")
+        if persist:
+            save_fault_config(config, config_multi, multi_count)
+            from utils.brainlink_game_export import save_fault_config_path
+            from config_defaults import get_default_config_path
+            # Prefer path shown in open ConfigForm; else default config.json
+            form = getattr(self, "config_form", None)
+            path = None
+            if form is not None and hasattr(form, "txt_filepath"):
+                path = (form.txt_filepath.text() or "").strip()
+            save_fault_config_path(path or get_default_config_path())
+        from utils.brainlink_game_export import write_brainlink_export
+        write_brainlink_export(self)
 
     def connect_device(self, address: str):
         """Connect to BrainLink device via pybrainlink with proper error handling"""
@@ -1164,6 +1534,17 @@ class MainWindow(QMainWindow):
                 device.on_eeg_data = self.on_eeg_data_event
                 device.on_extend_data = self.on_extend_data_event
                 device.on_gyro_data = self.on_gyro_data_event  # Always connect gyro callback
+
+                # Ensure state-machine parser (needed for Extended Data after EEG)
+                try:
+                    from pybrainlink.protocol_parser import ParserState  # noqa: F401
+                    logger.info("pybrainlink parser: state-machine OK (Extended Data supported)")
+                except ImportError:
+                    logger.error(
+                        "pybrainlink parser is outdated (no state-machine). "
+                        "Extended Data will stay at 0. Reinstall: "
+                        "pip install --force-reinstall git+https://github.com/haqury/pybrainlink.git@main"
+                    )
                 
                 logger.info(f"Attempting to connect to device: {address}")
                 
@@ -1360,43 +1741,46 @@ class MainWindow(QMainWindow):
             high_gamma=model.high_gamma,
             event_name=label_event_name
         )
+
+        # Rule-based: when ML is off and user is not holding a training key,
+        # detect event by matching current EEG against history.
+        if not self._use_ml_prediction and not label_event_name:
+            matched, match_confidence = self.history_service.get_event_name_by(h, self.config)
+            if matched:
+                event_name = matched
+                event_source = "rule-based"
+                self._last_base_confidence = match_confidence
+                logger.debug(
+                    f"History matched event: {event_name}, "
+                    f"confidence={match_confidence:.3f}"
+                )
         
-        # Process mouse control (use event_name = ML prediction or rule-based for actual control)
+        # Mouse control:
+        # - Use Key Control: move mouse from arrow keys (manual)
+        # - Enable Mouse Control: move mouse from automatic EEG prediction (history/ML)
         # "ne" (neutral) = action interrupted — treat like stop
         stop_events = (EventType.STOP.value, EventType.NEUTRAL.value)
-        if self.cb_autouse.isChecked():
-            if event_name and event_name not in stop_events:
-                self.mouse_service.play(h, self.config, event_name, self.cb_use_key.isChecked())
+        if label_event_name:
+            if self.cb_use_key.isChecked() and label_event_name not in stop_events:
+                self.mouse_service.play(h, self.config, label_event_name)
             else:
-                # No valid event or stop/ne - stop movement
+                self.mouse_service.stop()
+        elif self.cb_autouse.isChecked():
+            if event_name and event_name not in stop_events:
+                self.mouse_service.play(h, self.config, event_name)
+            else:
                 self.mouse_service.stop()
         else:
-            # Use history-based detection ONLY if ML didn't set event_name
-            # If ML is enabled and set event_name, don't overwrite it with rule-based!
-            if self._use_ml_prediction and event_source.startswith("ml-") and event_name:
-                # ML already set event_name - use it, don't overwrite with rule-based
-                if event_name and event_name not in stop_events:
-                    self.mouse_service.play(h, self.config, event_name, self.cb_use_key.isChecked())
-                else:
-                    self.mouse_service.stop()
-            else:
-                # ML not enabled or didn't set event - use history-based detection
-                history_event_name = self.history_service.get_event_name_by(h, self.config)
-                # Only play if event_name is not empty and not stop
-                if history_event_name and history_event_name not in stop_events:
-                    self.mouse_service.play(h, self.config, history_event_name, self.cb_use_key.isChecked())
-                else:
-                    # No event detected - stop movement
-                    self.mouse_service.stop()
-                # Note: Don't overwrite event_name here - keep ML prediction if it was set
+            self.mouse_service.stop()
         
         # Update EEG data form if open
         if self.eeg_data_form and self.eeg_data_form.isVisible():
             self.eeg_data_form.update_data(model)
         
-        # Add to history only when ML prediction is off (otherwise we'd save predictions)
+        # Add to history only when manually labeled and ML prediction is off
         if h.event_name and not self._use_ml_prediction:
             self.history_service.add(h)
+            self.update_counter()
         
         # Collect training data if in training mode.
         # ВАЖНО: используем label_event_name (ручной / rule-based),
@@ -1461,6 +1845,45 @@ class MainWindow(QMainWindow):
             else:
                 # ML disabled - allow rule-based
                 game_event = event_name
+
+            # Stabilize events for the game:
+            # - don't clear on a single missed history match (hold last event briefly)
+            # - require 2 consecutive same events before switching direction (reduce ml↔mr flicker)
+            now = time.monotonic()
+            hold_sec = 1.0
+            switch_confirm = 2
+            if not hasattr(self, "_sticky_game_event"):
+                self._sticky_game_event = ""
+                self._sticky_game_event_ts = 0.0
+                self._pending_game_event = ""
+                self._pending_game_event_count = 0
+
+            raw_event = game_event or ""
+            if raw_event:
+                if raw_event == self._sticky_game_event:
+                    self._sticky_game_event_ts = now
+                    self._pending_game_event = ""
+                    self._pending_game_event_count = 0
+                elif raw_event == self._pending_game_event:
+                    self._pending_game_event_count += 1
+                    if self._pending_game_event_count >= switch_confirm or not self._sticky_game_event:
+                        self._sticky_game_event = raw_event
+                        self._sticky_game_event_ts = now
+                        self._pending_game_event = ""
+                        self._pending_game_event_count = 0
+                else:
+                    self._pending_game_event = raw_event
+                    self._pending_game_event_count = 1
+                    if not self._sticky_game_event:
+                        self._sticky_game_event = raw_event
+                        self._sticky_game_event_ts = now
+                game_event = self._sticky_game_event
+            else:
+                if self._sticky_game_event and (now - self._sticky_game_event_ts) < hold_sec:
+                    game_event = self._sticky_game_event
+                else:
+                    self._sticky_game_event = ""
+                    game_event = ""
             
             # Log before filtering to see what we have
             if not hasattr(self, '_pre_filter_log_counter'):
@@ -1496,6 +1919,18 @@ class MainWindow(QMainWindow):
                 "ml_confidence": getattr(self, '_last_ml_confidence', 0.0),
                 "ml_probabilities": getattr(self, '_last_ml_probabilities', {}),
             }
+            # Game scales movement by ml_confidence. For Base prediction,
+            # confidence falls as the match uses a wider multi_count radius.
+            if game_event and not self._use_ml_prediction:
+                conf = float(getattr(self, "_last_base_confidence", 1.0))
+                eeg_data["ml_confidence"] = conf
+                eeg_data["ml_probabilities"] = {
+                    "ml": conf if game_event == "ml" else 0.0,
+                    "mr": conf if game_event == "mr" else 0.0,
+                    "mu": conf if game_event == "mu" else 0.0,
+                    "md": conf if game_event == "md" else 0.0,
+                    "stop": conf if game_event == "stop" else 0.0,
+                }
             # Always call update_eeg_data, even if event hasn't changed (to ensure it persists in shared memory)
             # Log before sending to shared memory (only for non-empty events, and only when it changes)
             if game_event and game_event != "":
@@ -1528,44 +1963,58 @@ class MainWindow(QMainWindow):
             
             # Update event source indicator
             if game_event:
-                source_text = "ML" if event_source == "ml-prediction" else "Rule"
+                source_text = "ML" if event_source.startswith("ml-") else "Base"
                 self.lbl_shm_event_source.setText(f"Event: {game_event} ({source_text})")
-                if event_source == "ml-prediction":
+                if event_source.startswith("ml-"):
                     self.lbl_shm_event_source.setStyleSheet("color: #4CAF50; font-size: 9pt; font-weight: bold;")
                 else:
-                    self.lbl_shm_event_source.setStyleSheet("color: #888; font-size: 9pt;")
+                    self.lbl_shm_event_source.setStyleSheet("color: #64B5F6; font-size: 9pt;")
             else:
-                self.lbl_shm_event_source.setText("Event: -")
+                mode = "ML" if self._use_ml_prediction else "Base"
+                self.lbl_shm_event_source.setText(f"Event: - ({mode})")
                 self.lbl_shm_event_source.setStyleSheet("color: #888; font-size: 9pt;")
 
     def on_extend_data_event(self, model: BrainLinkExtendModel):
         """Handle extended data event (called from device)"""
-        logger.info(f"🔵 Extended data received from device:")
-        logger.info(f"   AP: {model.ap}")
-        logger.info(f"   Electric: {model.electric}")
-        logger.info(f"   Version: '{model.version}'")
-        logger.info(f"   Temperature: {model.temperature}")
-        logger.info(f"   Heart Rate: {model.heart_rate}")
-        logger.debug(f"   Raw model: {model.__dict__ if hasattr(model, '__dict__') else model}")
-        self.extend_data_updated.emit(model)
+        try:
+            logger.info(
+                "Extended data received: ap=%s electric=%s version=%s temp=%s heart=%s",
+                getattr(model, "ap", None),
+                getattr(model, "electric", None),
+                getattr(model, "version", None),
+                getattr(model, "temperature", None),
+                getattr(model, "heart_rate", None),
+            )
+            self.extend_data_updated.emit(model)
+        except Exception:
+            logger.exception("Failed to forward extended data to UI")
 
     def on_extend_data_updated(self, model: BrainLinkExtendModel):
         """Handle extended data in main thread"""
-        logger.debug(f"Updating UI with extended data: ap={model.ap}, electric={model.electric}")
-        self.lbl_ap.setText(str(model.ap))
-        self.lbl_electric.setText(str(model.electric))
-        self.lbl_version.setText(model.version)
-        self.lbl_temp.setText(str(model.temperature))
-        self.lbl_heart.setText(str(model.heart_rate))
-        
-        # Update shared memory if enabled and game control is enabled
-        if self.shared_memory.is_running and self.chk_enable_game_control.isChecked():
-            self.shared_memory.update_extended_data(
-                ap=model.ap,
-                electric=model.electric,
-                temp=model.temperature,
-                heart=model.heart_rate
-            )
+        try:
+            ap = getattr(model, "ap", 0)
+            electric = getattr(model, "electric", 0)
+            version = getattr(model, "version", "") or ""
+            temperature = getattr(model, "temperature", 0)
+            heart_rate = getattr(model, "heart_rate", 0)
+
+            logger.debug("Updating UI with extended data: ap=%s, electric=%s", ap, electric)
+            self.lbl_ap.setText(str(ap))
+            self.lbl_electric.setText(str(electric))
+            self.lbl_version.setText(str(version))
+            self.lbl_temp.setText(str(temperature))
+            self.lbl_heart.setText(str(heart_rate))
+            
+            # Update shared memory if enabled and game control is enabled
+            if self.shared_memory.is_running and self.chk_enable_game_control.isChecked():
+                self.shared_memory.update_extended_data(
+                    ap=ap,
+                    electric=electric,
+                    temp=temperature,
+                    heart=heart_rate
+                )
+        except Exception:
+            logger.exception("Failed to update Extended Data UI")
     
     def on_gyro_data_event(self, x: int, y: int, z: int):
         """Handle gyro data event (called from device) - forward to gyro form if it exists"""

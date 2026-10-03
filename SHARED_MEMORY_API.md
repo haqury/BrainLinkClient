@@ -120,11 +120,58 @@ Shared memory содержит 25 полей (int32):
 | Offset | Поле | Описание | Диапазон |
 |--------|------|----------|----------|
 | 21 | COMMAND_PENDING | Флаг команды | 0 или 1 |
-| 22 | COMMAND_TYPE | Тип команды | 1=history, 2=ML |
-| 23 | COMMAND_EVENT_CODE | Код события | 0-5 |
+| 22 | COMMAND_TYPE | Тип команды | 1–9 (см. таблицу ниже) |
+| 23 | COMMAND_EVENT_CODE | Код события | 0-5 (для type 1–2; для 3–9 = 0) |
 | 24 | COMMAND_TIMESTAMP | Timestamp клиента | 0+ |
 
-**Общий размер:** 100 bytes (25 * 4)
+**COMMAND_TYPE (Game → Client):**
+
+| TYPE | Имя | Payload в `game_config.json` → `brainlink` | Нужен «Accept commands»? |
+|------|-----|--------------------------------------------|---------------------------|
+| 1 | save to history | `COMMAND_EVENT_CODE` | да |
+| 2 | save for ML training | `COMMAND_EVENT_CODE` | да |
+| 3 | save_model | `model_path` | **нет** (всегда) |
+| 4 | set_prediction_mode | `prediction_mode`: `"base"` \| `"ml"` | **нет** |
+| 5 | apply_base_fault | `base_fault` (поля EegFaultModel) | **нет** |
+| 6 | load_model | `model_path` | **нет** |
+| 7 | reset_model | — | **нет** |
+| 8 | load_history | `history_path` | **нет** |
+| 9 | export_settings_for_game | — (пишет `%APPDATA%\BrainLink\brainlink_export_for_game.json`) | **нет** |
+
+**Экспорт для игры (type 9 / Apply Config Fault):** файл  
+`%APPDATA%\BrainLink\brainlink_export_for_game.json`  
+схема `export_version: 1` — см. `utils/brainlink_game_export.py` (`fault_config_path`, `client_cwd`, `brainlink.base_fault` со всеми 11 полями).
+
+**Ключи `brainlink` в game config (пример):**
+
+```json
+{
+  "brainlink": {
+    "prediction_mode": "base",
+    "model_path": "C:\\\\BLconfig\\\\model.pkl",
+    "history_path": "C:\\\\BLconfig\\\\history.json",
+    "confidence_threshold": 0.6,
+    "prediction_weights": [1.0, 1.0, 1.0, 1.0, 1.0],
+    "base_fault": {
+      "attention": 5,
+      "meditation": 10,
+      "signal": 0,
+      "delta": 300,
+      "theta": 300,
+      "low_alpha": 0,
+      "high_alpha": 0,
+      "low_beta": 0,
+      "high_beta": 0,
+      "low_gamma": 0,
+      "high_gamma": 0
+    }
+  }
+}
+```
+
+Путь к конфигу: `--game-config` или `%APPDATA%\\BrainLink\\game_config_path.txt`.
+
+**Общий размер:** 124 bytes (31 * 4)
 
 **Event Codes:**
 ```

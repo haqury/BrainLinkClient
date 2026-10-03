@@ -24,16 +24,17 @@ class MouseService:
         eeg_data: EegHistoryModel,
         config: ConfigParams,
         event_name: str,
-        is_use: bool
+        is_use: bool = True,
     ):
         """
-        Execute mouse action based on event
+        Execute mouse action based on event.
         
         Args:
             eeg_data: Current EEG data
             config: Configuration parameters
             event_name: Event name (ml, mr, mu, md, stop)
-            is_use: Whether to use keyboard control
+            is_use: Unused (kept for older callers). Gating is done by MainWindow
+                    via Enable Mouse Control / Use Key Control.
         """
         # Stop previous timer if exists
         if self._timer is not None:
@@ -47,15 +48,9 @@ class MouseService:
             self._current_event = ""
             return
 
-        # Start movement only if event is valid and control is enabled
-        if is_use:
-            self._stop_flag = False
-            self._current_event = event_name
-            self._start_continuous_movement()
-        else:
-            # Control disabled - stop movement
-            self._stop_flag = True
-            self._current_event = ""
+        self._stop_flag = False
+        self._current_event = event_name
+        self._start_continuous_movement()
 
     def _start_continuous_movement(self):
         """Start continuous mouse movement"""

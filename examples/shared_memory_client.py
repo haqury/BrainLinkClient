@@ -49,12 +49,25 @@ class BrainLinkSharedMemoryClient:
     HEART = 20
     
     # Command fields (for sending events back to BrainLink)
+    # COMMAND_TYPE:
+    #   1=history, 2=ML training, 3=save_model, 4=set_prediction_mode,
+    #   5=apply_base_fault, 6=load_model, 7=reset_model, 8=load_history,
+    #   9=export_settings_for_game
     COMMAND_PENDING = 21
     COMMAND_TYPE = 22
     COMMAND_EVENT_CODE = 23
     COMMAND_TIMESTAMP = 24
-    
-    TOTAL_SIZE = 25 * 4  # 25 fields * 4 bytes (int32)
+
+    # ML stats (client → game)
+    ML_CONFIDENCE = 25
+    ML_PROB_ML = 26
+    ML_PROB_MR = 27
+    ML_PROB_MU = 28
+    ML_PROB_MD = 29
+    ML_PROB_STOP = 30
+
+    TOTAL_FIELDS = 31
+    TOTAL_SIZE = TOTAL_FIELDS * 4  # 124 bytes
     
     def __init__(self, memory_name="brainlink_data"):
         """
@@ -251,6 +264,53 @@ class BrainLinkSharedMemoryClient:
         except Exception as e:
             print(f"❌ Error sending ML training data: {e}")
             return False
+
+    def _send_config_command(self, command_type: int, name: str) -> bool:
+        """
+        Send a config command (types 3–8). Payload is read by the client from game_config.json.
+        COMMAND_EVENT_CODE is unused (0).
+        """
+        if not self.connected:
+            print("❌ Not connected to shared memory")
+            return False
+        try:
+            self._write_int(self.COMMAND_TYPE, int(command_type))
+            self._write_int(self.COMMAND_EVENT_CODE, 0)
+            self._write_int(self.COMMAND_TIMESTAMP, int(time.time() * 1000))
+            self._write_int(self.COMMAND_PENDING, 1)
+            print(f"📤 Sent command type={command_type} ({name})")
+            return True
+        except Exception as e:
+            print(f"❌ Error sending command {name}: {e}")
+            return False
+
+    def send_save_model_command(self) -> bool:
+        """Type 3: client saves model to brainlink.model_path from game config."""
+        return self._send_config_command(3, "save_model")
+
+    def send_set_prediction_mode_command(self) -> bool:
+        """Type 4: client reads brainlink.prediction_mode ('base'|'ml')."""
+        return self._send_config_command(4, "set_prediction_mode")
+
+    def send_apply_base_fault_command(self) -> bool:
+        """Type 5: client applies brainlink.base_fault (keeps multi_fault/multi_count)."""
+        return self._send_config_command(5, "apply_base_fault")
+
+    def send_load_model_command(self) -> bool:
+        """Type 6: client loads model from brainlink.model_path."""
+        return self._send_config_command(6, "load_model")
+
+    def send_reset_model_command(self) -> bool:
+        """Type 7: client resets in-memory ML model (history untouched)."""
+        return self._send_config_command(7, "reset_model")
+
+    def send_load_history_command(self) -> bool:
+        """Type 8: client loads brainlink.history_path and rebuilds ML training data."""
+        return self._send_config_command(8, "load_history")
+
+    def send_export_settings_command(self) -> bool:
+        """Type 9: client writes %APPDATA%\\BrainLink\\brainlink_export_for_game.json."""
+        return self._send_config_command(9, "export_settings_for_game")
 
 
 # ==================== EXAMPLE USAGE ====================

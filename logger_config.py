@@ -30,7 +30,11 @@ def setup_logging(log_level=logging.INFO):
         datefmt='%Y-%m-%d %H:%M:%S'
     )
     
-    # Console handler (stdout)
+    # Console handler (stdout) — tolerate cp1251 consoles (emoji/unicode safe)
+    try:
+        sys.stdout.reconfigure(errors="replace")
+    except Exception:
+        pass
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(log_level)
     console_handler.setFormatter(formatter)
