@@ -930,12 +930,15 @@ class MLTrainerService(QObject):
                 import numpy as np
                 # Create dummy features (10 features matching MLTrainingData)
                 dummy_features = [50.0] * 10  # All features = 50
-                X_test = np.array([dummy_features])
+                X_test = np.array([dummy_features], dtype=float)
+                if self.scaler is not None:
+                    X_test = self.scaler.transform(X_test)
                 _ = self.model.predict(X_test)
                 logger.debug("Model validation test passed")
             except Exception as e:
                 logger.error(f"Model validation test failed: {e}", exc_info=True)
                 self.model = None
+                self.scaler = None
                 self.is_trained = False
                 return False
             
@@ -946,6 +949,7 @@ class MLTrainerService(QObject):
         except Exception as e:
             logger.error(f"Error loading model: {e}", exc_info=True)
             self.model = None
+            self.scaler = None
             self.is_trained = False
             return False
     
@@ -965,6 +969,7 @@ class MLTrainerService(QObject):
         explicitly loaded again.
         """
         self.model = None
+        self.scaler = None
         self.is_trained = False
         self.last_training_metrics = None
         logger.info("ML model has been reset (no trained model is currently loaded)")

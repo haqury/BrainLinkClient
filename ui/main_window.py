@@ -154,6 +154,9 @@ class MainWindow(QMainWindow):
         self.ml_trainer.model_updated.connect(self.on_model_updated)
         
         logger.info("MainWindow initialized with system tray")
+
+        from utils.brainlink_game_export import write_brainlink_export
+        QTimer.singleShot(800, lambda: write_brainlink_export(self))
         
         # Initialize devices on startup
         QTimer.singleShot(500, self.initialize_devices)
@@ -701,12 +704,25 @@ class MainWindow(QMainWindow):
         """Handle minimize to tray checkbox state change"""
         self._minimize_to_tray = (state == Qt.Checked)
     
-    def on_prediction_mode_changed(self, button):
-        """Handle Prediction Base/ML radio switch."""
-        use_ml = button is self.rb_pred_ml
-        self.chk_use_ml_prediction.blockSignals(True)
-        self.chk_use_ml_prediction.setChecked(use_ml)
-        self.chk_use_ml_prediction.blockSignals(False)
+    def set_prediction_mode(self, use_ml: bool):
+        """
+        Set Base/ML prediction mode and sync all related UI controls.
+        Safe to call from UI or shared-memory game commands.
+        """
+        use_ml = bool(use_ml)
+        if hasattr(self, 'rb_pred_ml') and hasattr(self, 'rb_pred_base'):
+            self.rb_pred_ml.blockSignals(True)
+            self.rb_pred_base.blockSignals(True)
+            if use_ml:
+                self.rb_pred_ml.setChecked(True)
+            else:
+                self.rb_pred_base.setChecked(True)
+            self.rb_pred_ml.blockSignals(False)
+            self.rb_pred_base.blockSignals(False)
+        if hasattr(self, 'chk_use_ml_prediction'):
+            self.chk_use_ml_prediction.blockSignals(True)
+            self.chk_use_ml_prediction.setChecked(use_ml)
+            self.chk_use_ml_prediction.blockSignals(False)
         self._use_ml_prediction = use_ml
         logger.info(f"Prediction mode: {'ML' if use_ml else 'Base (history)'}")
         if hasattr(self, 'ml_control_form') and self.ml_control_form and hasattr(self.ml_control_form, 'chk_use_ml'):
@@ -720,34 +736,16 @@ class MainWindow(QMainWindow):
         self._sticky_game_event_ts = 0.0
         self._pending_game_event = ""
         self._pending_game_event_count = 0
+        from utils.brainlink_game_export import write_brainlink_export
+        write_brainlink_export(self)
+
+    def on_prediction_mode_changed(self, button):
+        """Handle Prediction Base/ML radio switch."""
+        self.set_prediction_mode(button is self.rb_pred_ml)
 
     def on_use_ml_prediction_changed(self, state):
         """Handle use ML prediction checkbox state change (checkbox is never auto-unchecked; no errors if model missing)."""
-        enabled = state == Qt.Checked
-        self._use_ml_prediction = enabled
-        logger.info(f"ML prediction: {'enabled' if enabled else 'disabled'}")
-        # Keep radio buttons in sync (e.g. when toggled from ML Control form)
-        if hasattr(self, 'rb_pred_ml') and hasattr(self, 'rb_pred_base'):
-            self.rb_pred_ml.blockSignals(True)
-            self.rb_pred_base.blockSignals(True)
-            if enabled:
-                self.rb_pred_ml.setChecked(True)
-            else:
-                self.rb_pred_base.setChecked(True)
-            self.rb_pred_ml.blockSignals(False)
-            self.rb_pred_base.blockSignals(False)
-        # Sync ML control form if open
-        if hasattr(self, 'ml_control_form') and self.ml_control_form:
-            try:
-                self.ml_control_form.chk_use_ml.blockSignals(True)
-                self.ml_control_form.chk_use_ml.setChecked(enabled)
-                self.ml_control_form.chk_use_ml.blockSignals(False)
-            except Exception:
-                pass
-        self._sticky_game_event = ""
-        self._sticky_game_event_ts = 0.0
-        self._pending_game_event = ""
-        self._pending_game_event_count = 0
+        self.set_prediction_mode(state == Qt.Checked)
 
     # ==================== History path persistence ====================
     def _load_history_path(self) -> str:
@@ -775,6 +773,8 @@ class MainWindow(QMainWindow):
             with open(self._history_config_path, "w", encoding="utf-8") as f:
                 json.dump({"history_path": path}, f, indent=2, ensure_ascii=False)
             logger.info(f"Saved history path to {self._history_config_path}: {path}")
+            from utils.brainlink_game_export import write_brainlink_export
+            write_brainlink_export(self)
         except Exception as e:
             logger.error(f"Failed to save history path config: {e}", exc_info=True)
 
@@ -810,16 +810,9 @@ class MainWindow(QMainWindow):
         self.history_service.load(self._history_path)
         self.update_counter()
         
-        # Keep ML training data in sync with loaded history:
-        # clear existing training_data and rebuild it from the newly loaded history.
+        # Keep ML training data in sync with loaded history
         try:
-            self.ml_trainer.clear_training_data()
-            imported, skipped = self.ml_trainer.import_from_history(self.history_service.history)
-            logger.info(f"Rebuilt ML training data from history: imported={imported}, skipped={skipped}")
-            
-            # Update ML Control window if it's open
-            if self.ml_control_form and self.ml_control_form.isVisible():
-                self.ml_control_form.update_status()
+            self._rebuild_ml_training_from_history()
         except Exception as e:
             logger.error(f"Error rebuilding ML training data from history: {e}", exc_info=True)
 
@@ -1010,69 +1003,337 @@ class MainWindow(QMainWindow):
             except:
                 pass
     
+    def _resolve_game_config_path(self) -> Optional[str]:
+        """
+        Resolve path to game_config.json:
+        1) --game-config / self._game_config_path
+        2) %APPDATA%\\BrainLink\\game_config_path.txt
+        """
+        import os
+        game_config_path = getattr(self, "_game_config_path", None)
+        if game_config_path:
+            return str(game_config_path).strip() or None
+
+        fallback_dir = Path(os.environ.get("APPDATA", os.path.expanduser("~"))) / "BrainLink"
+        fallback_file = fallback_dir / "game_config_path.txt"
+        if not fallback_file.exists():
+            return None
+        try:
+            path = fallback_file.read_text(encoding="utf-8").strip()
+            if path:
+                logger.info("Using game config path from %s: %s", fallback_file, path)
+                return path
+        except Exception as e:
+            logger.warning("Could not read game_config_path.txt: %s", e)
+        return None
+
+    def _load_game_brainlink_section(self) -> Optional[dict]:
+        """Load brainlink section from game_config.json. Returns None on failure."""
+        game_config_path = self._resolve_game_config_path()
+        if not game_config_path:
+            logger.warning("No game config path (start BrainLink from game or write game_config_path.txt)")
+            return None
+        path = Path(game_config_path)
+        if not path.exists():
+            logger.warning("Game config file not found: %s", path)
+            return None
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            bl = data.get("brainlink")
+            if not isinstance(bl, dict):
+                logger.warning("Game config missing 'brainlink' section: %s", path)
+                return None
+            return bl
+        except Exception as e:
+            logger.error("Failed to read game config %s: %s", path, e, exc_info=True)
+            return None
+
+    def _rebuild_ml_training_from_history(self) -> None:
+        """Clear ML training buffer and rebuild from current history_service data."""
+        self.ml_trainer.clear_training_data()
+        imported, skipped = self.ml_trainer.import_from_history(self.history_service.history)
+        logger.info(
+            "Rebuilt ML training data from history: imported=%s, skipped=%s",
+            imported,
+            skipped,
+        )
+        if self.ml_control_form and self.ml_control_form.isVisible():
+            self.ml_control_form.update_status()
+
+    def _handle_game_cmd_save_model(self) -> None:
+        """COMMAND_TYPE 3: save trained model to brainlink.model_path."""
+        bl = self._load_game_brainlink_section()
+        if bl is None:
+            self.tray_icon.show_message(
+                "Save model",
+                "Start BrainLink from game to save model.",
+                QSystemTrayIcon.Warning,
+            )
+            return
+        model_path_raw = (bl.get("model_path") or "").strip()
+        if not model_path_raw:
+            logger.warning("Save model command: brainlink.model_path is empty in game config")
+            self.tray_icon.show_message(
+                "Save model",
+                "Set model path in game settings first.",
+                QSystemTrayIcon.Warning,
+            )
+            return
+        model_path = str(Path(model_path_raw).resolve())
+        self.ml_trainer.config.model_path = model_path
+        try:
+            if self.ml_trainer.save_model():
+                logger.info("Saved ML model to %s (from game config)", model_path)
+                from utils.brainlink_game_export import write_brainlink_export
+                write_brainlink_export(self)
+                self.tray_icon.show_message(
+                    "Model Saved",
+                    f"Model saved to: {model_path}",
+                    QSystemTrayIcon.Information,
+                )
+            else:
+                self.tray_icon.show_message(
+                    "Save model",
+                    "No model to save. Train the model first (collect data and train).",
+                    QSystemTrayIcon.Warning,
+                )
+        except Exception as e:
+            logger.error("Failed to save model from game command: %s", e, exc_info=True)
+            self.tray_icon.show_message("Save model", f"Error: {e}", QSystemTrayIcon.Critical)
+
+    def _handle_game_cmd_set_prediction_mode(self) -> None:
+        """COMMAND_TYPE 4: set Base/ML from brainlink.prediction_mode."""
+        bl = self._load_game_brainlink_section()
+        if bl is None:
+            self.tray_icon.show_message(
+                "Prediction mode",
+                "Game config not found.",
+                QSystemTrayIcon.Warning,
+            )
+            return
+        mode = str(bl.get("prediction_mode", "")).strip().lower()
+        if mode not in ("base", "ml"):
+            logger.warning("Invalid prediction_mode in game config: %r (expected 'base'|'ml')", mode)
+            self.tray_icon.show_message(
+                "Prediction mode",
+                f"Invalid prediction_mode: {mode!r}",
+                QSystemTrayIcon.Warning,
+            )
+            return
+        self.set_prediction_mode(use_ml=(mode == "ml"))
+        self.tray_icon.show_message(
+            "Prediction mode",
+            f"Switched to {mode.upper()}",
+            QSystemTrayIcon.Information,
+        )
+
+    def _handle_game_cmd_apply_base_fault(self) -> None:
+        """COMMAND_TYPE 5: apply brainlink.base_fault; keep multi_fault/multi_count."""
+        bl = self._load_game_brainlink_section()
+        if bl is None:
+            self.tray_icon.show_message(
+                "Base fault",
+                "Game config not found.",
+                QSystemTrayIcon.Warning,
+            )
+            return
+        base_raw = bl.get("base_fault")
+        if not isinstance(base_raw, dict):
+            logger.warning("apply_base_fault: brainlink.base_fault missing or not an object")
+            self.tray_icon.show_message(
+                "Base fault",
+                "brainlink.base_fault missing in game config.",
+                QSystemTrayIcon.Warning,
+            )
+            return
+        try:
+            base = EegFaultModel.from_dict(base_raw)
+            multi_raw = bl.get("multi_fault")
+            if isinstance(multi_raw, dict):
+                multi = EegFaultModel.from_dict(multi_raw)
+            else:
+                multi = self.config.eeg_fault_multi or EegFaultModel()
+            if "multi_count" in bl:
+                multi_count = max(1, int(bl.get("multi_count") or 1))
+            else:
+                multi_count = int(self.config.multi_count or 1)
+            self.set_config_fault(base, multi, multi_count, persist=True)
+            logger.info(
+                "Applied fault config from game (multi_count=%s, multi from %s)",
+                multi_count,
+                "game config" if isinstance(multi_raw, dict) else "client",
+            )
+            self.tray_icon.show_message(
+                "Base fault",
+                "Base fault tolerance applied.",
+                QSystemTrayIcon.Information,
+            )
+        except Exception as e:
+            logger.error("Failed to apply base_fault: %s", e, exc_info=True)
+            self.tray_icon.show_message("Base fault", f"Error: {e}", QSystemTrayIcon.Critical)
+
+    def _handle_game_cmd_load_model(self) -> None:
+        """COMMAND_TYPE 6: load model from brainlink.model_path."""
+        bl = self._load_game_brainlink_section()
+        if bl is None:
+            self.tray_icon.show_message(
+                "Load model",
+                "Game config not found.",
+                QSystemTrayIcon.Warning,
+            )
+            return
+        model_path_raw = (bl.get("model_path") or "").strip()
+        if not model_path_raw:
+            logger.warning("Load model: brainlink.model_path is empty")
+            self.tray_icon.show_message(
+                "Load model",
+                "Set model path in game settings first.",
+                QSystemTrayIcon.Warning,
+            )
+            return
+        model_path = str(Path(model_path_raw).resolve())
+        if not Path(model_path).exists():
+            logger.warning("Load model: file not found: %s", model_path)
+            self.tray_icon.show_message(
+                "Load model",
+                f"File not found:\n{model_path}",
+                QSystemTrayIcon.Warning,
+            )
+            return
+        self.ml_trainer.config.model_path = model_path
+        try:
+            ok = self.ml_trainer.load_model()
+            if ok:
+                logger.info("Loaded ML model from %s (game command)", model_path)
+                if hasattr(self, "chk_use_ml_prediction"):
+                    self.chk_use_ml_prediction.setEnabled(True)
+                if self.ml_control_form and self.ml_control_form.isVisible():
+                    self.ml_control_form.update_status()
+                from utils.brainlink_game_export import write_brainlink_export
+                write_brainlink_export(self)
+                self.tray_icon.show_message(
+                    "Load model",
+                    f"Model loaded:\n{model_path}",
+                    QSystemTrayIcon.Information,
+                )
+            else:
+                self.tray_icon.show_message(
+                    "Load model",
+                    "Failed to load/validate model.",
+                    QSystemTrayIcon.Warning,
+                )
+        except Exception as e:
+            logger.error("Load model command failed: %s", e, exc_info=True)
+            self.tray_icon.show_message("Load model", f"Error: {e}", QSystemTrayIcon.Critical)
+
+    def _handle_game_cmd_reset_model(self) -> None:
+        """COMMAND_TYPE 7: clear in-memory model (history untouched)."""
+        try:
+            self.ml_trainer.reset_model()
+            if self.ml_control_form and self.ml_control_form.isVisible():
+                self.ml_control_form.update_status()
+            from utils.brainlink_game_export import write_brainlink_export
+            write_brainlink_export(self)
+            logger.info("ML model reset via game command")
+            self.tray_icon.show_message(
+                "Reset model",
+                "In-memory ML model cleared.",
+                QSystemTrayIcon.Information,
+            )
+        except Exception as e:
+            logger.error("Reset model command failed: %s", e, exc_info=True)
+            self.tray_icon.show_message("Reset model", f"Error: {e}", QSystemTrayIcon.Critical)
+
+    def _handle_game_cmd_load_history(self) -> None:
+        """COMMAND_TYPE 8: load history JSON from brainlink.history_path and rebuild ML data."""
+        bl = self._load_game_brainlink_section()
+        if bl is None:
+            self.tray_icon.show_message(
+                "Load history",
+                "Game config not found.",
+                QSystemTrayIcon.Warning,
+            )
+            return
+        history_path_raw = (bl.get("history_path") or "").strip()
+        if not history_path_raw:
+            logger.warning("Load history: brainlink.history_path is empty")
+            self.tray_icon.show_message(
+                "Load history",
+                "Set history_path in game settings first.",
+                QSystemTrayIcon.Warning,
+            )
+            return
+        history_path = str(Path(history_path_raw).resolve())
+        if not Path(history_path).exists():
+            logger.warning("Load history: file not found: %s", history_path)
+            self.tray_icon.show_message(
+                "Load history",
+                f"File not found:\n{history_path}",
+                QSystemTrayIcon.Warning,
+            )
+            return
+        try:
+            self.history_service.load(history_path)
+            self._history_path = history_path
+            self._save_history_path(history_path)
+            if hasattr(self, "txt_filepath"):
+                self.txt_filepath.setText(history_path)
+            self.update_counter()
+            self._rebuild_ml_training_from_history()
+            logger.info("Loaded history from %s (game command)", history_path)
+            self.tray_icon.show_message(
+                "Load history",
+                f"Loaded {self.history_service.count()} records.",
+                QSystemTrayIcon.Information,
+            )
+        except Exception as e:
+            logger.error("Load history command failed: %s", e, exc_info=True)
+            self.tray_icon.show_message("Load history", f"Error: {e}", QSystemTrayIcon.Critical)
+
     def on_shm_command_received(self, command: dict):
         """Handle command received from game client via shared memory"""
         try:
             command_type = command.get("type", 0)
             event_name = command.get("event", "")
 
-            # Type 3: Save ML model to path from game config — всегда обрабатываем (не зависит от "Accept commands")
+            # Types 3–8: always process (independent of "Accept commands from games").
+            # Payload comes from game_config.json → brainlink.*.
             if command_type == 3:
-                game_config_path = getattr(self, '_game_config_path', None)
-                # Если BrainLink запущен без --game-config, пробуем прочитать путь из файла (игра его записывает при "Save model")
-                if not game_config_path:
-                    import os
-                    fallback_dir = Path(os.environ.get("APPDATA", os.path.expanduser("~"))) / "BrainLink"
-                    fallback_file = fallback_dir / "game_config_path.txt"
-                    if fallback_file.exists():
-                        try:
-                            game_config_path = fallback_file.read_text(encoding="utf-8").strip()
-                            if game_config_path:
-                                logger.info("Using game config path from %s: %s", fallback_file, game_config_path)
-                        except Exception as e:
-                            logger.warning("Could not read game_config_path.txt: %s", e)
-                    if not game_config_path:
-                        logger.warning("Save model command ignored: no game config path (start BrainLink from game or save model from game first)")
-                        self.tray_icon.show_message("Save model", "Start BrainLink from game to save model.", QSystemTrayIcon.Warning)
-                        return
-                path = Path(game_config_path)
-                if not path.exists():
-                    logger.warning("Save model command ignored: game config file not found: %s", path)
-                    self.tray_icon.show_message("Save model", "Game config file not found.", QSystemTrayIcon.Warning)
-                    return
-                try:
-                    with open(path, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                    bl = data.get("brainlink", {})
-                    model_path_raw = (bl.get("model_path") or "").strip()
-                    if not model_path_raw:
-                        logger.warning("Save model command: brainlink.model_path is empty in game config")
-                        self.tray_icon.show_message("Save model", "Set model path in game settings first.", QSystemTrayIcon.Warning)
-                        return
-                    # Абсолютный путь, чтобы сохранить в нужное место независимо от cwd
-                    model_path = str(Path(model_path_raw).resolve())
-                    self.ml_trainer.config.model_path = model_path
-                    if self.ml_trainer.save_model():
-                        logger.info("Saved ML model to %s (from game config)", model_path)
-                        self.tray_icon.show_message("Model Saved", f"Model saved to: {model_path}", QSystemTrayIcon.Information)
-                    else:
-                        self.tray_icon.show_message("Save model", "No model to save. Train the model first (collect data and train).", QSystemTrayIcon.Warning)
-                except Exception as e:
-                    logger.error("Failed to save model from game command: %s", e, exc_info=True)
-                    self.tray_icon.show_message("Save model", f"Error: {e}", QSystemTrayIcon.Critical)
+                self._handle_game_cmd_save_model()
+                return
+            if command_type == 4:
+                self._handle_game_cmd_set_prediction_mode()
+                return
+            if command_type == 5:
+                self._handle_game_cmd_apply_base_fault()
+                return
+            if command_type == 6:
+                self._handle_game_cmd_load_model()
+                return
+            if command_type == 7:
+                self._handle_game_cmd_reset_model()
+                return
+            if command_type == 8:
+                self._handle_game_cmd_load_history()
+                return
+            if command_type == 9:
+                from utils.brainlink_game_export import write_brainlink_export
+                write_brainlink_export(self)
+                logger.info("Exported BrainLink settings for game (command type 9)")
                 return
 
-            # Остальные команды — только если включено "Accept commands from games"
+            # Types 1–2 — only if "Accept commands from games" is enabled
             if not self.chk_accept_game_commands.isChecked():
                 logger.debug("Game commands ignored: 'Accept commands from games' is disabled")
                 return
-            
+
             if not event_name:
                 logger.warning("Received command with empty event name")
                 return
-            
+
             logger.info(f"Processing command from game: type={command_type}, event={event_name}")
-            
+
             # Type 1: Save event to history (only when we have EEG data; skip when ML on — game may echo our prediction)
             if command_type == 1:
                 if not self.chk_auto_save_history.isChecked():
@@ -1107,7 +1368,7 @@ class MainWindow(QMainWindow):
                     f"Game saved event: {event_name}",
                     QSystemTrayIcon.Information
                 )
-            
+
             # Type 2: Save for ML training (only when we have EEG data from device — no zero-only)
             elif command_type == 2:
                 if not self.chk_auto_save_ml.isChecked():
@@ -1158,13 +1419,13 @@ class MainWindow(QMainWindow):
                     f"Game added training sample: {event_name}",
                     QSystemTrayIcon.Information
                 )
-            
+
             else:
                 logger.warning(f"Unknown command type: {command_type}")
-        
+
         except Exception as e:
             logger.error(f"Error processing shared memory command: {e}", exc_info=True)
-    
+
     def update_counter(self):
         """Update history counter display"""
         self.lbl_counter.setText(str(self.history_service.count()))
@@ -1201,6 +1462,7 @@ class MainWindow(QMainWindow):
             new_fault = EegFaultModel(
                 attention=int(prev_fault.attention * config_multi.attention),
                 meditation=int(prev_fault.meditation * config_multi.meditation),
+                signal=int(prev_fault.signal * max(config_multi.signal, 1)),
                 low_alpha=int(prev_fault.low_alpha * config_multi.low_alpha),
                 low_beta=int(prev_fault.low_beta * config_multi.low_beta),
                 low_gamma=int(prev_fault.low_gamma * config_multi.low_gamma),
@@ -1216,6 +1478,16 @@ class MainWindow(QMainWindow):
         logger.info(f"Config updated: multi_count={multi_count}")
         if persist:
             save_fault_config(config, config_multi, multi_count)
+            from utils.brainlink_game_export import save_fault_config_path
+            from config_defaults import get_default_config_path
+            # Prefer path shown in open ConfigForm; else default config.json
+            form = getattr(self, "config_form", None)
+            path = None
+            if form is not None and hasattr(form, "txt_filepath"):
+                path = (form.txt_filepath.text() or "").strip()
+            save_fault_config_path(path or get_default_config_path())
+        from utils.brainlink_game_export import write_brainlink_export
+        write_brainlink_export(self)
 
     def connect_device(self, address: str):
         """Connect to BrainLink device via pybrainlink with proper error handling"""

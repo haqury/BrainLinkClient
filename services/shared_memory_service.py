@@ -47,9 +47,14 @@ class SharedMemoryLayout:
     HEART: int = 20  # offset 80
     
     # === CLIENT -> SERVER COMMANDS (bidirectional communication) ===
+    # COMMAND_TYPE:
+    #   1=save_event (history), 2=save_ml_training, 3=save_model,
+    #   4=set_prediction_mode, 5=apply_base_fault, 6=load_model,
+    #   7=reset_model, 8=load_history, 9=export_settings_for_game
+    # Types 3–8 read payload from game_config.json (brainlink.*); type 9 writes APPDATA export; types 1–2 use EVENT_CODE.
     COMMAND_PENDING: int = 21  # offset 84: 1 if command pending, 0 if processed
-    COMMAND_TYPE: int = 22  # offset 88: 1=save_event, 2=save_ml_training, 3=save_model
-    COMMAND_EVENT_CODE: int = 23  # offset 92: event code to save
+    COMMAND_TYPE: int = 22  # offset 88: see list above
+    COMMAND_EVENT_CODE: int = 23  # offset 92: event code for types 1–2 (unused for 3–9)
     COMMAND_TIMESTAMP: int = 24  # offset 96: client timestamp
     
     # ML statistics for game HUD (0-1000 = 0.0-1.0)
