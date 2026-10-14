@@ -110,6 +110,9 @@ class MainWindow(QMainWindow):
         # State
         self.current_event = ""
         self.keyboard_listener: Optional[keyboard.Listener] = None
+        self._capture_arrow_keys = False
+        self._held_arrow_boxes = []
+        self._arrow_lock = threading.Lock()
         self._minimize_to_tray = True  # Minimize to tray by default
         
         # Connection management
@@ -125,9 +128,8 @@ class MainWindow(QMainWindow):
         
         # Setup UI
         self.init_ui()
-        self.setup_keyboard_listener()
         # Eat arrow keys in the UI (except text fields) so Windows/Qt focus
-        # navigation doesn't toggle radios/combos; pynput still labels training.
+        # navigation doesn't toggle radios/combos. Global capture is opt-in.
         QApplication.instance().installEventFilter(self)
         
         # Connect signals
@@ -305,8 +307,19 @@ class MainWindow(QMainWindow):
         
         self.cb_autouse = QCheckBox("Enable Mouse Control")
         self.cb_autouse.setToolTip("Move the mouse from automatic EEG events (history match or ML)")
+        self.chk_capture_keys = QCheckBox("Capture arrow keys")
+        self.chk_capture_keys.setChecked(False)
+        self.chk_capture_keys.setToolTip(
+            "Listen for held arrow keys and use them as the current action. "
+            "Off: the app does not read the keyboard; actions come from the game "
+            "or from the direction checkboxes."
+        )
+        self.chk_capture_keys.stateChanged.connect(self.on_capture_keys_changed)
         self.cb_use_key = QCheckBox("Use Key Control")
-        self.cb_use_key.setToolTip("Move the mouse while holding arrow keys (manual training / direct control)")
+        self.cb_use_key.setToolTip(
+            "Move the mouse from the current labeled action "
+            "(captured arrow keys, or the direction checkboxes)"
+        )
         self.chk_minimize_to_tray = QCheckBox("Minimize to tray")
         self.chk_minimize_to_tray.setChecked(True)
         self.chk_minimize_to_tray.setToolTip("Minimize to system tray instead of closing")
@@ -334,6 +347,7 @@ class MainWindow(QMainWindow):
         self.chk_use_ml_prediction.stateChanged.connect(self.on_use_ml_prediction_changed)
         
         control_layout.addWidget(self.cb_autouse)
+        control_layout.addWidget(self.chk_capture_keys)
         control_layout.addWidget(self.cb_use_key)
         control_layout.addWidget(prediction_mode_label)
         control_layout.addWidget(self.rb_pred_base)
@@ -494,41 +508,84 @@ class MainWindow(QMainWindow):
                 return True
         return super().eventFilter(obj, event)
 
-    def setup_keyboard_listener(self):
-        """Setup global keyboard listener"""
-        def on_press(key):
-            """Handle key press events"""
-            try:
-                if key == keyboard.Key.left:
-                    self.cb_ml.setChecked(True)
-                elif key == keyboard.Key.right:
-                    self.cb_mr.setChecked(True)
-                elif key == keyboard.Key.up:
-                    self.cb_mu.setChecked(True)
-                elif key == keyboard.Key.down:
-                    self.cb_md.setChecked(True)
-            except Exception:
-                pass
-        
-        def on_release(key):
-            """Handle key release events"""
-            try:
-                if key == keyboard.Key.left:
-                    self.cb_ml.setChecked(False)
-                elif key == keyboard.Key.right:
-                    self.cb_mr.setChecked(False)
-                elif key == keyboard.Key.up:
-                    self.cb_mu.setChecked(False)
-                elif key == keyboard.Key.down:
-                    self.cb_md.setChecked(False)
-            except Exception:
-                pass
-        
+    def on_capture_keys_changed(self, state):
+        """Start or stop the global arrow-key listener."""
+        enabled = state == Qt.Checked
+        self._capture_arrow_keys = enabled
+        if enabled:
+            self._start_keyboard_listener()
+        else:
+            self._stop_keyboard_listener()
+            self._release_captured_keys()
+
+    def _arrow_box_for_key(self, key):
+        if key == keyboard.Key.left:
+            return self.cb_ml
+        if key == keyboard.Key.right:
+            return self.cb_mr
+        if key == keyboard.Key.up:
+            return self.cb_mu
+        if key == keyboard.Key.down:
+            return self.cb_md
+        return None
+
+    def _on_arrow_press(self, key):
+        if not self._capture_arrow_keys:
+            return
+        box = self._arrow_box_for_key(key)
+        if box is None:
+            return
+        try:
+            with self._arrow_lock:
+                if box not in self._held_arrow_boxes:
+                    self._held_arrow_boxes.append(box)
+            box.setChecked(True)
+        except Exception:
+            pass
+
+    def _on_arrow_release(self, key):
+        if not self._capture_arrow_keys:
+            return
+        box = self._arrow_box_for_key(key)
+        if box is None:
+            return
+        try:
+            with self._arrow_lock:
+                if box in self._held_arrow_boxes:
+                    self._held_arrow_boxes.remove(box)
+            box.setChecked(False)
+        except Exception:
+            pass
+
+    def _start_keyboard_listener(self):
+        """Start a global listener. pynput listeners cannot be restarted after stop."""
+        if self.keyboard_listener is not None:
+            return
         self.keyboard_listener = keyboard.Listener(
-            on_press=on_press,
-            on_release=on_release
+            on_press=self._on_arrow_press,
+            on_release=self._on_arrow_release,
         )
         self.keyboard_listener.start()
+        logger.info("Arrow-key capture started")
+
+    def _stop_keyboard_listener(self):
+        listener = self.keyboard_listener
+        self.keyboard_listener = None
+        if listener is None:
+            return
+        try:
+            listener.stop()
+            logger.info("Arrow-key capture stopped")
+        except Exception as e:
+            logger.error(f"Error stopping keyboard listener: {e}")
+
+    def _release_captured_keys(self):
+        """Clear direction checkboxes that were set by a held arrow key."""
+        with self._arrow_lock:
+            held = list(self._held_arrow_boxes)
+            self._held_arrow_boxes.clear()
+        for box in held:
+            box.setChecked(False)
 
     def initialize_devices(self):
         """Initialize device list on startup"""
@@ -2074,12 +2131,8 @@ class MainWindow(QMainWindow):
                 self.disconnect_device()
             
             # Stop keyboard listener
-            if self.keyboard_listener:
-                logger.info("Stopping keyboard listener")
-                try:
-                    self.keyboard_listener.stop()
-                except Exception as e:
-                    logger.error(f"Error stopping keyboard listener: {e}")
+            self._capture_arrow_keys = False
+            self._stop_keyboard_listener()
             
             # Stop mouse service
             logger.info("Stopping mouse service")
